@@ -12,7 +12,7 @@ init(autoreset=True)
 
 client = OpenAI(
     api_key=os.getenv("API_KEY"),
-    base_url="https://helmholtz-blablador.fz-juelich.de:8000/v1"
+    base_url=os.getenv("OPENAI_BASE_URL")
 )
 
 def get_available_models():

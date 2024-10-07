@@ -7,13 +7,12 @@ python3 main.py
 ```
 
 ## Requirements
-```
 - uv: `pip install uv`
 - openai, colorama and dotenv: `uv pip install openai colorama python-dotenv`
-```
 
 ## Configuration
 Create a `.env` file with the following content:
 ```
 API_KEY=your blablador key
+OPENAI_BASE_URL=https://helmholtz-blablador.fz-juelich.de:8000/v1
 ```
