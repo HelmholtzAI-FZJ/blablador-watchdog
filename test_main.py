@@ -50,7 +50,7 @@ def mock_openai_client():
 @patch("openai.OpenAI", mock_openai_client)
 def test_get_available_models():
     models = get_available_models()
-    assert os.getenv(OPENAI_BASE_URL) in models
+    assert "alias-fast" in models
 
 # Mocking OpenAI client for tests
 @patch("openai.OpenAI", mock_openai_client)
