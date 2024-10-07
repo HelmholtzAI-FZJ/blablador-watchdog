@@ -8,7 +8,7 @@ python3 main.py
 
 ## Requirements
 - uv: `pip install uv`
-- openai, colorama and dotenv: `uv pip install openai colorama python-dotenv flake8`
+- openai, colorama and dotenv: `uv pip install openai colorama python-dotenv flake8 pytest`
 
 ## Configuration
 Create a `.env` file with the following content:
