@@ -62,6 +62,6 @@ if __name__ == "__main__":
             if word.lower() in response.lower():
                 print(f"{Fore.GREEN}✅ LLM response: {response}")
             else:
-                print(f"{Fore.RED}❌ LLM response does not contain the word '{word}'. Reply: {response}")
+                raise Exception(f"{Fore.RED}❌ The word '{word}' is not correct in the response: {response}")
 
     print(f"{Style.RESET_ALL}")  # Reset color at the end
