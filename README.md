@@ -14,5 +14,5 @@ python3 main.py
 Create a `.env` file with the following content:
 ```
 API_KEY=your blablador key
-OPENAI_BASE_URL=https://helmholtz-blablador.fz-juelich.de:8000/v1
+OPENAI_BASE_URL=https://api.helmholtz-blablador.fz-juelich.de/v1
 ```
