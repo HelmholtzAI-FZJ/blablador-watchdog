@@ -3,7 +3,7 @@ This checks if blablador is working correctly by asking each model for a word. T
 
 ## Usage
 ```bash
-python3 main.py
+./run.sh
 ```
 
 ## Requirements
