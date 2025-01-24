@@ -50,6 +50,7 @@ if __name__ == "__main__":
         No sentences, no explanations, no definitions. Just the word."
 
     models = get_available_models()
+    broken_models = []
 
     if not models:
         print(f"{Fore.RED}❌ No models available. Exiting.")
@@ -62,6 +63,11 @@ if __name__ == "__main__":
             if word.lower() in response.lower():
                 print(f"{Fore.GREEN}✅ LLM response: {response}")
             else:
-                raise Exception(f"{Fore.RED}❌ The word '{word}' is not correct in the response: {response}")
+                broken_models.append(model)
+                print(f"{Fore.RED}❌ The word '{word}' is not correct in the response: {response}")
+
+    if broken_models:
+        print(f"\n{Fore.YELLOW}🔥 Broken models: {', '.join(broken_models)}")
+        raise Exception(f"{Fore.RED}❌ The word '{word}' is not correct in the response for the models: {', '.join(broken_models)}")
 
     print(f"{Style.RESET_ALL}")  # Reset color at the end
