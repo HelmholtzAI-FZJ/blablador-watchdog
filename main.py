@@ -51,6 +51,7 @@ if __name__ == "__main__":
 
     models = get_available_models()
     broken_models = []
+    broken_gpus = []
 
     if not models:
         print(f"{Fore.RED}❌ No models available. Exiting.")
@@ -62,12 +63,18 @@ if __name__ == "__main__":
             response = get_llm_response(prompt, model)
             if word.lower() in response.lower():
                 print(f"{Fore.GREEN}✅ LLM response: {response}")
+            elif "CUDA error:" in response:
+                broken_models.append(model)
+                print(f"{Fore.RED}❌ HARDWARE FAILURE IN {model}: {response}")
             else:
                 broken_models.append(model)
-                print(f"{Fore.RED}❌ The word '{word}' is not correct in the response: {response}")
+                print(f"{Fore.RED}❌ LLM response: {response}")
 
     if broken_models:
         print(f"\n{Fore.YELLOW}🔥 Broken models: {', '.join(broken_models)}")
+
+    if broken_gpus:
+        # **NETWORK ERROR DUE TO HIGH TRAFFIC. PLEASE REGENERATE OR REFRESH THIS PAGE.**\n\n(CUDA error: device-side assert triggered\nCUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.\nFor debugging consider passing CUDA_LAUNCH_BLOCKING=1\nCompile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.\n)', 'code': 50001}
         raise Exception(f"{Fore.RED}❌ The word '{word}' is not correct in the response for the models: {', '.join(broken_models)}")
 
     print(f"{Style.RESET_ALL}")  # Reset color at the end
