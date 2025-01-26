@@ -66,6 +66,9 @@ if __name__ == "__main__":
             elif "CUDA error:" in response:
                 broken_models.append(model)
                 print(f"{Fore.RED}❌ HARDWARE FAILURE IN {model}: {response}")
+            elif "Internal Server Error" in response:
+                broken_models.append(model)
+                print(f"{Fore.RED}❌ LLM FAILURE IN {model}: {response}")
             else:
                 broken_models.append(model)
                 print(f"{Fore.RED}❌ LLM response: {response}")
