@@ -74,10 +74,10 @@ if __name__ == "__main__":
                 print(f"{Fore.RED}❌ LLM response: {response}")
 
     if broken_models:
-        print(f"\n{Fore.YELLOW}🔥 Broken models: {', '.join(broken_models)}")
+        print(f"\n{Fore.RED}🔥🔥 Bad model response[s]: {', '.join(broken_models)}")
 
     if broken_gpus:
         # **NETWORK ERROR DUE TO HIGH TRAFFIC. PLEASE REGENERATE OR REFRESH THIS PAGE.**\n\n(CUDA error: device-side assert triggered\nCUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.\nFor debugging consider passing CUDA_LAUNCH_BLOCKING=1\nCompile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.\n)', 'code': 50001}
-        raise Exception(f"{Fore.RED}❌ The word '{word}' is not correct in the response for the models: {', '.join(broken_models)}")
+        raise Exception(f"{Fore.RED}❌❌❌ These models should be restarted: {', '.join(broken_models)}")
 
     print(f"{Style.RESET_ALL}")  # Reset color at the end
