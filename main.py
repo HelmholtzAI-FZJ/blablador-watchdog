@@ -56,7 +56,9 @@ if __name__ == "__main__":
     if not models:
         print(f"{Fore.RED}❌ No models available. Exiting.")
     else:
-        print(f"{Fore.CYAN}🤖 Available models: {', '.join(models)}")
+        print(f"{Fore.CYAN}🤖 Available models:")
+        for model_name in models:
+            print(f"{Fore.CYAN}  - {model_name}")
         for model in models:
             print(f"\n{Fore.YELLOW}📊 Testing model: {model}")
             print(f"{Fore.BLUE}🚀 Sending request to LLM...")
