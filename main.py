@@ -36,11 +36,12 @@ def get_llm_response(prompt, model):
             stop=None,
             stream=False,
             presence_penalty=0,
-            frequency_penalty=0
+            frequency_penalty=0,
+            reasoning_effort="low",
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
-        return f"An error occurred: {str(e)}"
+        return f"An error occurred: {str(e)} on {response.choices[0].message.content}"
 
 
 # Main execution
