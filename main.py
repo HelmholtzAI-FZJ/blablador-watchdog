@@ -39,7 +39,10 @@ def get_llm_response(prompt, model):
             frequency_penalty=0,
             reasoning_effort="low",
         )
-        return response.choices[0].message.content.strip()
+        if response and hasattr(response, 'choices') and response.choices:
+            return response.choices[0].message.content.strip()
+        else:
+            return "An error occurred: Invalid response from LLM"
     except Exception as e:
         return f"An error occurred: {str(e)} on {response.choices[0].message.content}"
 
