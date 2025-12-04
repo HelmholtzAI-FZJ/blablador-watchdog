@@ -43,8 +43,18 @@ def get_llm_response(prompt, model):
             return response.choices[0].message.content.strip()
         else:
             return "An error occurred: Invalid response from LLM"
+    except UnboundLocalError as e:
+        print(f"{Fore.RED}Warning (UnboundLocalError): {e}")
+        # Continue execution: return empty string so caller can keep processing
+        return ""
     except Exception as e:
-        return f"An error occurred: {str(e)} on {response.choices[0].message.content}"
+        extra = ""
+        if 'response' in locals() and response and hasattr(response, 'choices') and response.choices:
+            try:
+                extra = f" on {response.choices[0].message.content}"
+            except Exception:
+                extra = ""
+        return f"An error occurred: {str(e)}{extra}"
 
 
 # Main execution
