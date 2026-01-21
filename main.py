@@ -15,6 +15,12 @@ client = OpenAI(
     base_url=os.getenv("OPENAI_BASE_URL")
 )
 
+embedding_client = OpenAI(
+    api_key=os.getenv("EMBEDDINGS_API_KEY") or os.getenv("API_KEY"),
+    base_url=os.getenv("OPENAI_EMBEDDINGS_BASE_URL") or os.getenv("OPENAI_BASE_URL")
+)
+
+
 
 def get_available_models():
     try:
@@ -28,24 +34,41 @@ def get_available_models():
 def get_llm_response(prompt, model):
     response = None
     try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-            top_p=1,
-            n=1,
-            max_tokens=30,
-            stop=None,
-            stream=False,
-            presence_penalty=0,
-            frequency_penalty=0,
-            reasoning_effort="low",
-        )
+        def request_completion(max_tokens):
+            return client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                top_p=1,
+                n=1,
+                max_tokens=max_tokens,
+                stop=None,
+                stream=False,
+                presence_penalty=0,
+                frequency_penalty=0,
+                reasoning_effort="low",
+            )
+
+        response = request_completion(30)
         if response and hasattr(response, 'choices') and response.choices:
             message = getattr(response.choices[0], "message", None)
             content = getattr(message, "content", None) if message else None
             if isinstance(content, str):
                 return content.strip()
+            reasoning = None
+            if message:
+                reasoning = (
+                    getattr(message, "reasoning_content", None)
+                    or getattr(message, "reasoning", None)
+                )
+            finish_reason = getattr(response.choices[0], "finish_reason", None)
+            if reasoning and finish_reason == "length":
+                response = request_completion(256)
+                if response and hasattr(response, "choices") and response.choices:
+                    message = getattr(response.choices[0], "message", None)
+                    content = getattr(message, "content", None) if message else None
+                    if isinstance(content, str):
+                        return content.strip()
             print(f"{Fore.RED}Empty response content from model: {model}")
             return "An error occurred: Empty response content from LLM"
         else:
@@ -72,7 +95,7 @@ def get_llm_response(prompt, model):
 def get_embedding_response(text, model):
     response = None
     try:
-        response = client.embeddings.create(
+        response = embedding_client.embeddings.create(
             model=model,
             input=text,
         )
