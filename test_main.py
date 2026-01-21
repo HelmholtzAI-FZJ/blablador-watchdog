@@ -1,59 +1,82 @@
-import os
 from unittest.mock import patch
-from main import get_available_models, get_llm_response
+from main import get_available_models, get_llm_response, get_embedding_response
 
 # Mocking OpenAI client
 class MockOpenAI:
-    class MockClient:
-        class MockModels:
-            def list(self):
-                return MockResponse()
+    class MockModels:
+        def list(self):
+            return ModelsResponse()
 
-        class MockChat:
-            class MockCompletions:
-                def create(self, **kwargs):
-                    return MockResponse()
+    class MockChat:
+        class MockCompletions:
+            def create(self, **kwargs):
+                if kwargs.get("model") == "nonexistent_model":
+                    raise Exception("Model not found")
+                return ChatResponse()
 
-        models = MockModels()
-        chat = MockChat()
+        completions = MockCompletions()
+
+    class MockEmbeddings:
+        def create(self, **kwargs):
+            return EmbeddingResponse()
 
     def __init__(self, api_key, base_url):
-        pass
+        self.models = self.MockModels()
+        self.chat = self.MockChat()
+        self.embeddings = self.MockEmbeddings()
 
-class MockResponse:
+class ModelsResponse:
     def __init__(self):
-        self.data = [MockModel("alias-fast"), MockModel("alias-code")]
+        self.data = [
+            MockModel("alias-fast"),
+            MockModel("alias-code"),
+            MockModel("alias-embeddings"),
+        ]
 
-    def json(self):
-        return self.data
+
+class ChatResponse:
+    def __init__(self):
+        self.choices = [MockChoice()]
+
+
+class MockChoice:
+    def __init__(self):
+        self.message = MockMessage()
+
+
+class MockMessage:
+    def __init__(self):
+        self.content = "Potato"
+
+
+class EmbeddingResponse:
+    def __init__(self):
+        self.data = [MockEmbedding()]
+
+
+class MockEmbedding:
+    def __init__(self):
+        self.embedding = [0.1, 0.2, 0.3]
+
 
 class MockModel:
     def __init__(self, id):
         self.id = id
 
-# Mocking os.getenv
-def mock_os_getenv(key):
-    if key == "API_KEY":
-        return "mock_api_key"
-    elif key == "OPENAI_BASE_URL":
-        return "mock_base_url"
-    else:
-        return None
-
-# Mocking OpenAI client initialization
 def mock_openai_client():
     return MockOpenAI("mock_api_key", "mock_base_url")
 
-# Mocking os.getenv for tests
-@patch("os.getenv", mock_os_getenv)
+mock_client = mock_openai_client()
+
 # Mocking OpenAI client for tests
-@patch("openai.OpenAI", mock_openai_client)
+@patch("main.client", mock_client)
 def test_get_available_models():
     models = get_available_models()
     assert "alias-fast" in models
+    assert "alias-embeddings" in models
 
 # Mocking OpenAI client for tests
-@patch("openai.OpenAI", mock_openai_client)
+@patch("main.client", mock_client)
 def test_get_llm_response():
     prompt = "Give me ONLY a word. The word is potato. Nothing else."
     model = "alias-fast"
@@ -61,9 +84,17 @@ def test_get_llm_response():
     assert "Potato" in response
 
 # Mocking OpenAI client for tests
-@patch("openai.OpenAI", mock_openai_client)
+@patch("main.client", mock_client)
 def test_get_llm_response_error():
     prompt = "Give me ONLY a word. The word is potato. Nothing else."
     model = "nonexistent_model"
     response = get_llm_response(prompt, model)
     assert "An error occurred" in response
+
+
+# Mocking OpenAI client for tests
+@patch("main.client", mock_client)
+def test_get_embedding_response():
+    response = get_embedding_response("potato", "alias-embeddings")
+    assert isinstance(response, list)
+    assert response

@@ -1,5 +1,5 @@
 # blablador-watchdog
-This checks if blablador is working correctly by asking each model for a word. This should ensure that the models are responding.
+This checks if blablador is working correctly by asking each model for a word. Embedding models are tested via an embedding request instead of chat. This should ensure that the models are responding.
 
 ## Usage
 ```bash
@@ -24,3 +24,6 @@ OPENAI_BASE_URL=https://api.helmholtz-blablador.fz-juelich.de/v1
 - [ ] Differenciate between a model that is answering bullshit with a gpu failure.
 - [ ] Try with lowest temperature so model always answer the same
 - [ ] Make sure that all "base" models are working: `alias-fast`, `alias-large`, `alias-code` and `alias-embeddings`
+
+## Embedding models
+Embedding models are routed to an embedding test (not chat) and configured in `embedding_models.py`.
