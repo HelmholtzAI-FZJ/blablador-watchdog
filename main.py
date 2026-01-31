@@ -21,6 +21,11 @@ embedding_client = OpenAI(
 )
 
 
+def is_embedding_model(model):
+    if "embedding" in model:
+        return True
+    return model in EMBEDDING_MODELS
+
 
 def get_available_models():
     try:
@@ -138,7 +143,7 @@ if __name__ == "__main__":
             print(f"{Fore.CYAN}  - {model_name}")
         for model in models:
             print(f"\n{Fore.YELLOW}📊 Testing model: {model}")
-            if model in EMBEDDING_MODELS:
+            if is_embedding_model(model):
                 print(f"{Fore.BLUE}🧠 Sending request to embedding model...")
                 response = get_embedding_response(word, model)
                 if response == "An error occurred: Empty embedding response":
