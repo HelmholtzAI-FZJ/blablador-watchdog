@@ -8,7 +8,7 @@ This checks if blablador is working correctly by asking each model for a word. E
 
 ## Requirements
 - uv: `pip install uv`
-- openai, colorama and dotenv: `uv pip install openai colorama python-dotenv flake8 pytest`
+- openai, dotenv, textual: `uv pip install openai python-dotenv textual flake8 pytest`
 
 ## Configuration
 Create a `.env` file with the following content:

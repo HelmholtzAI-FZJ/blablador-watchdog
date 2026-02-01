@@ -1,23 +1,24 @@
-from openai import OpenAI
-from colorama import init, Fore, Style
-from dotenv import load_dotenv
-from embedding_models import EMBEDDING_MODELS
+import asyncio
 import os
 
-# Load environment variables
-load_dotenv()
+from openai import OpenAI
+from dotenv import load_dotenv
+from textual.app import App, ComposeResult
+from textual.containers import Container
+from textual.widgets import Static
 
-# Initialize colorama
-init(autoreset=True)
+from embedding_models import EMBEDDING_MODELS
+
+load_dotenv()
 
 client = OpenAI(
     api_key=os.getenv("API_KEY"),
-    base_url=os.getenv("OPENAI_BASE_URL")
+    base_url=os.getenv("OPENAI_BASE_URL"),
 )
 
 embedding_client = OpenAI(
     api_key=os.getenv("EMBEDDINGS_API_KEY") or os.getenv("API_KEY"),
-    base_url=os.getenv("OPENAI_EMBEDDINGS_BASE_URL") or os.getenv("OPENAI_BASE_URL")
+    base_url=os.getenv("OPENAI_EMBEDDINGS_BASE_URL") or os.getenv("OPENAI_BASE_URL"),
 )
 
 
@@ -32,7 +33,6 @@ def get_available_models():
         models = client.models.list()
         return [model.id for model in models.data]
     except Exception as e:
-        print(f"{Fore.RED}An error occurred while fetching models: {str(e)}")
         return []
 
 
@@ -74,14 +74,10 @@ def get_llm_response(prompt, model):
                     content = getattr(message, "content", None) if message else None
                     if isinstance(content, str):
                         return content.strip()
-            print(f"{Fore.RED}Empty response content from model: {model}")
             return "An error occurred: Empty response content from LLM"
         else:
-            print(f"{Fore.RED}Invalid response from model: {model}")
             return "An error occurred: Invalid response from LLM"
     except UnboundLocalError as e:
-        print(f"{Fore.RED}Warning (UnboundLocalError) in {model}: {e}")
-        # Continue execution: return empty string so caller can keep processing
         return ""
     except Exception as e:
         extra = ""
@@ -93,7 +89,6 @@ def get_llm_response(prompt, model):
                     extra = f" on {content}"
             except Exception:
                 extra = ""
-        print(f"{Fore.RED}Exception from model {model}: {e}{extra}")
         return f"An error occurred: {str(e)}{extra}"
 
 
@@ -108,119 +103,229 @@ def get_embedding_response(text, model):
             embedding = getattr(response.data[0], "embedding", None)
             if isinstance(embedding, list) and embedding:
                 return embedding
-            print(f"{Fore.RED}Empty embedding response from model: {model}")
             return "An error occurred: Empty embedding response"
         else:
-            print(f"{Fore.RED}Invalid embedding response from model: {model}")
             return "An error occurred: Invalid embedding response"
     except UnboundLocalError as e:
-        print(f"{Fore.RED}Warning (UnboundLocalError) in {model}: {e}")
         return ""
     except Exception as e:
-        print(f"{Fore.RED}Exception from model {model}: {e}")
         return f"An error occurred: {str(e)}"
 
 
-# Main execution
-if __name__ == "__main__":
-    word = "potato"
-    prompt = f"Give me ONLY a word. The word is {word}. Nothing else. \
-        No sentences, no explanations, no definitions. Just the word."
+def check_model(model, word, prompt):
+    if is_embedding_model(model):
+        response = get_embedding_response(word, model)
+        if response == "An error occurred: Empty embedding response":
+            return False, response
+        if response == "An error occurred: Invalid embedding response":
+            return False, response
+        if isinstance(response, list):
+            return True, response
+        if "CUDA error:" in response:
+            return False, response
+        if "Internal Server Error" in response:
+            return False, response
+        return False, response
 
-    models = get_available_models()
-    broken_models = []
-    broken_gpus = []
-    empty_response_models = []
-    invalid_response_models = []
-    empty_embedding_models = []
-    invalid_embedding_models = []
+    response = get_llm_response(prompt, model)
+    if response == "An error occurred: Empty response content from LLM":
+        return False, response
+    if response == "An error occurred: Invalid response from LLM":
+        return False, response
+    if word.lower() in response.lower():
+        return True, response
+    if "CUDA error:" in response:
+        return False, response
+    if "Internal Server Error" in response:
+        return False, response
+    return False, response
 
-    if not models:
-        print(f"{Fore.RED}❌ No models available. Exiting.")
-    else:
-        print(f"{Fore.CYAN}🤖 Available models:")
-        for model_name in models:
-            print(f"{Fore.CYAN}  - {model_name}")
+
+class ModelStatus(Static):
+    def __init__(self, model):
+        self.model = model
+        self.status = "PENDING"
+        super().__init__("", classes="pending")
+
+    def render(self):
+        max_width = 30
+        if self.app:
+            columns = 3
+            gutter = 2
+            grid_padding = 4
+            cell_padding = 4
+            border_width = 2
+            available = self.app.size.width - grid_padding - (columns - 1) * gutter
+            column_width = max(available // columns, 1)
+            max_width = max(column_width - cell_padding - border_width, 4)
+
+        def truncate_text(value: str) -> str:
+            if len(value) <= max_width:
+                return value
+            if max_width <= 1:
+                return "…"
+            return f"{value[:max_width - 1]}…"
+
+        model_text = truncate_text(self.model)
+        status_text = truncate_text(self.status)
+        return f"{model_text}\n{status_text}"
+
+    def set_status(self, status):
+        self.status = status
+        self.update(self.render())
+        self.remove_class("pending", "ok", "fail")
+        if status == "OK":
+            self.add_class("ok")
+        elif status == "FAIL":
+            self.add_class("fail")
+        else:
+            self.add_class("pending")
+
+
+class WatchdogApp(App):
+    CSS = """
+    Screen {
+        layout: vertical;
+        background: #0f1217;
+        color: #e6e6e6;
+    }
+
+    #title {
+        height: 1;
+        padding: 0 2;
+        text-style: bold;
+        background: #161b22;
+    }
+
+    #grid {
+        layout: grid;
+        grid-size: 3;
+        grid-columns: 1fr 1fr 1fr;
+        grid-gutter: 1 2;
+        padding: 1 2;
+    }
+
+    #status {
+        height: 1;
+        padding: 0 2;
+        color: #9aa4b2;
+        background: #161b22;
+    }
+
+    ModelStatus {
+        border: round #2a3240;
+        padding: 1 2;
+        height: 6;
+        text-align: left;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
+        min-width: 0;
+        overflow: hidden hidden;
+        content-align: left middle;
+    }
+
+    ModelStatus.pending {
+        background: #1b1f2a;
+        color: #9aa4b2;
+    }
+
+    ModelStatus.ok {
+        background: #0f2b1a;
+        color: #7de6b4;
+        border: round #1f5f3f;
+    }
+
+    ModelStatus.fail {
+        background: #351315;
+        color: #ff9a9a;
+        border: round #6b2c2f;
+    }
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.model_widgets = {}
+        self.models = []
+        self.grid = None
+        self.status_line = None
+
+    def compose(self) -> ComposeResult:
+        yield Static("Blablador Watchdog", id="title")
+        self.grid = Container(id="grid")
+        yield self.grid
+        self.status_line = Static("Loading models...", id="status")
+        yield self.status_line
+
+    async def on_mount(self):
+        await self.load_models()
+
+    async def load_models(self):
+        if self.status_line:
+            self.status_line.update("Loading models...")
+        models = await asyncio.to_thread(get_available_models)
+        self.models = models
+        self.model_widgets = {}
+
+        if not models:
+            if self.status_line:
+                self.status_line.update("No models available.")
+            return
+
         for model in models:
-            print(f"\n{Fore.YELLOW}📊 Testing model: {model}")
-            if is_embedding_model(model):
-                print(f"{Fore.BLUE}🧠 Sending request to embedding model...")
-                response = get_embedding_response(word, model)
-                if response == "An error occurred: Empty embedding response":
-                    empty_embedding_models.append(model)
-                    broken_models.append(model)
-                    print(f"{Fore.RED}❌ EMPTY EMBEDDING RESPONSE IN {model}: {response}")
-                elif response == "An error occurred: Invalid embedding response":
-                    invalid_embedding_models.append(model)
-                    broken_models.append(model)
-                    print(f"{Fore.RED}❌ INVALID EMBEDDING RESPONSE IN {model}: {response}")
-                elif isinstance(response, list):
-                    print(f"{Fore.GREEN}✅ Embedding length: {len(response)}")
-                elif "CUDA error:" in response:
-                    broken_models.append(model)
-                    print(f"{Fore.RED}❌ HARDWARE FAILURE IN {model}: {response}")
-                elif "Internal Server Error" in response:
-                    broken_models.append(model)
-                    print(f"{Fore.RED}❌ EMBEDDING FAILURE IN {model}: {response}")
-                else:
-                    broken_models.append(model)
-                    print(f"{Fore.RED}❌ EMBEDDING response: {response}")
-            else:
-                print(f"{Fore.BLUE}🚀 Sending request to LLM...")
-                response = get_llm_response(prompt, model)
-                if response == "An error occurred: Empty response content from LLM":
-                    empty_response_models.append(model)
-                    broken_models.append(model)
-                    print(f"{Fore.RED}❌ EMPTY LLM RESPONSE IN {model}: {response}")
-                elif response == "An error occurred: Invalid response from LLM":
-                    invalid_response_models.append(model)
-                    broken_models.append(model)
-                    print(f"{Fore.RED}❌ INVALID LLM RESPONSE IN {model}: {response}")
-                elif word.lower() in response.lower():
-                    print(f"{Fore.GREEN}✅ LLM response: {response}")
-                elif "CUDA error:" in response:
-                    broken_models.append(model)
-                    print(f"{Fore.RED}❌ HARDWARE FAILURE IN {model}: {response}")
-                elif "Internal Server Error" in response:
-                    broken_models.append(model)
-                    print(f"{Fore.RED}❌ LLM FAILURE IN {model}: {response}")
-                else:
-                    broken_models.append(model)
-                    print(f"{Fore.RED}❌ LLM response: {response}")
+            widget = ModelStatus(model)
+            self.model_widgets[model] = widget
+            if self.grid:
+                self.grid.mount(widget)
 
-    if broken_models:
-        print(
-            f"\n{Fore.RED}🔥🔥 Bad model response[s] ({len(broken_models)}): "
-            f"{', '.join(broken_models)}"
+        if self.status_line:
+            self.status_line.update(f"Testing {len(models)} models...")
+        self.run_worker(self.run_checks(), exclusive=True)
+
+    async def run_checks(self):
+        word = "potato"
+        prompt = (
+            f"Give me ONLY a word. The word is {word}. Nothing else. "
+            "No sentences, no explanations, no definitions. Just the word."
         )
+        successes = []
+        failures = []
 
-    if (
-        empty_response_models
-        or invalid_response_models
-        or empty_embedding_models
-        or invalid_embedding_models
-    ):
-        parts = []
-        if empty_response_models:
-            parts.append(
-                f"empty({len(empty_response_models)}): {', '.join(empty_response_models)}"
-            )
-        if invalid_response_models:
-            parts.append(
-                f"invalid({len(invalid_response_models)}): {', '.join(invalid_response_models)}"
-            )
-        if empty_embedding_models:
-            parts.append(
-                f"embedding-empty({len(empty_embedding_models)}): {', '.join(empty_embedding_models)}"
-            )
-        if invalid_embedding_models:
-            parts.append(
-                f"embedding-invalid({len(invalid_embedding_models)}): {', '.join(invalid_embedding_models)}"
-            )
-        print(f"\n{Fore.RED}⚠️ Response issues: {'; '.join(parts)}")
+        async def check_one(model: str):
+            try:
+                ok, response = await asyncio.wait_for(
+                    asyncio.to_thread(check_model, model, word, prompt),
+                    timeout=45.0,
+                )
+            except asyncio.TimeoutError:
+                return model, False, "Timeout after 45s"
+            return model, ok, response
 
-    if broken_gpus:
-        # **NETWORK ERROR DUE TO HIGH TRAFFIC. PLEASE REGENERATE OR REFRESH THIS PAGE.**\n\n(CUDA error: device-side assert triggered\nCUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.\nFor debugging consider passing CUDA_LAUNCH_BLOCKING=1\nCompile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.\n)', 'code': 50001}
-        raise Exception(f"{Fore.RED}❌❌❌ These models should be restarted: {', '.join(broken_models)}")
+        tasks = [asyncio.create_task(check_one(model)) for model in self.models]
+        total = len(tasks)
+        for index, task in enumerate(asyncio.as_completed(tasks), start=1):
+            model, ok, response = await task
+            if self.status_line:
+                self.status_line.update(f"Testing {index}/{total}: {model}")
+            widget = self.model_widgets.get(model)
+            if widget:
+                widget.set_status("OK" if ok else "FAIL")
+            if ok:
+                successes.append(model)
+            else:
+                failures.append((model, response))
 
-    print(f"{Style.RESET_ALL}")  # Reset color at the end
+        report_lines = [f"Successes ({len(successes)}):"]
+        report_lines.extend(successes or ["- none"])
+        report_lines.extend(["", f"Failures ({len(failures)}):"])
+        if failures:
+            report_lines.extend(
+                f"{model} :: {error}" for model, error in failures
+            )
+        else:
+            report_lines.append("- none")
+        report = "\n".join(report_lines)
+        self.exit(message=report)
+
+
+if __name__ == "__main__":
+    WatchdogApp().run()
