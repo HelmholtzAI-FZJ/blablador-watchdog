@@ -31,9 +31,15 @@ def is_embedding_model(model):
 
 def get_available_models():
     try:
+        print(f"DEBUG: Fetching models from {os.getenv('OPENAI_BASE_URL')}...", flush=True)
         models = client.models.list()
-        return [model.id for model in models.data]
+        model_list = [model.id for model in models.data]
+        print(f"DEBUG: Found {len(model_list)} models: {model_list}", flush=True)
+        return model_list
     except Exception as e:
+        print(f"DEBUG: Error fetching models: {type(e).__name__}: {str(e)}", flush=True)
+        import traceback
+        traceback.print_exc()
         return []
 
 
@@ -382,6 +388,8 @@ class WatchdogApp(App):
 
 
 async def run_quiet():
+    print(f"DEBUG: API_KEY set: {bool(os.getenv('API_KEY'))}", flush=True)
+    print(f"DEBUG: OPENAI_BASE_URL: {os.getenv('OPENAI_BASE_URL', 'not set')}", flush=True)
     word = "potato"
     prompt = (
         f"Give me ONLY a word. The word is {word}. Nothing else. "
