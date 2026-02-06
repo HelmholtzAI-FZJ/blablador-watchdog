@@ -381,5 +381,68 @@ class WatchdogApp(App):
         self.exit(message=report)
 
 
+async def run_quiet():
+    word = "potato"
+    prompt = (
+        f"Give me ONLY a word. The word is {word}. Nothing else. "
+        "No sentences, no explanations, no definitions. Just the word."
+    )
+    models = await asyncio.to_thread(get_available_models)
+    if not models:
+        print("No models available.")
+        return
+
+    async def check_one(model: str):
+        start = time.monotonic()
+        try:
+            ok, response, tokens_used = await asyncio.wait_for(
+                asyncio.to_thread(check_model, model, word, prompt),
+                timeout=45.0,
+            )
+        except asyncio.TimeoutError:
+            elapsed = time.monotonic() - start
+            return model, False, "Timeout after 45s", elapsed, None
+        elapsed = time.monotonic() - start
+        return model, ok, response, elapsed, tokens_used
+
+    tasks = [asyncio.create_task(check_one(model)) for model in models]
+    successes = []
+    failures = []
+
+    for task in asyncio.as_completed(tasks):
+        model, ok, response, elapsed, tokens_used = await task
+        tokens_per_s = None
+        if tokens_used and elapsed and elapsed > 0:
+            tokens_per_s = tokens_used / elapsed
+        if ok:
+            successes.append((model, elapsed, tokens_per_s))
+        else:
+            failures.append((model, response, elapsed, tokens_per_s))
+
+    successes.sort(key=lambda x: x[2] if x[2] else -1, reverse=True)
+    failures.sort(key=lambda x: x[3] if x[3] else -1, reverse=True)
+
+    def fmt_tps(val):
+        return f"{val:.1f} tok/s" if val else "n/a"
+
+    print(f"Successes ({len(successes)}):")
+    if successes:
+        for model, elapsed, tokens_per_s in successes:
+            print(f"  {model} :: {elapsed:.2f}s :: {fmt_tps(tokens_per_s)}")
+    else:
+        print("  - none")
+
+    print(f"\nFailures ({len(failures)}):")
+    if failures:
+        for model, error, elapsed, tokens_per_s in failures:
+            print(f"  {model} :: {error} :: {elapsed:.2f}s :: {fmt_tps(tokens_per_s)}")
+    else:
+        print("  - none")
+
+
 if __name__ == "__main__":
-    WatchdogApp().run()
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--quiet":
+        asyncio.run(run_quiet())
+    else:
+        WatchdogApp().run()
