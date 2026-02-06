@@ -25,6 +25,10 @@ class MockOpenAI:
         self.chat = self.MockChat()
         self.embeddings = self.MockEmbeddings()
 
+
+def mock_embedding_client():
+    return MockOpenAI("mock_api_key", "mock_base_url")
+
 class ModelsResponse:
     def __init__(self):
         self.data = [
@@ -80,7 +84,7 @@ def test_get_available_models():
 def test_get_llm_response():
     prompt = "Give me ONLY a word. The word is potato. Nothing else."
     model = "alias-fast"
-    response = get_llm_response(prompt, model)
+    response, _ = get_llm_response(prompt, model)
     assert "Potato" in response
 
 # Mocking OpenAI client for tests
@@ -88,13 +92,15 @@ def test_get_llm_response():
 def test_get_llm_response_error():
     prompt = "Give me ONLY a word. The word is potato. Nothing else."
     model = "nonexistent_model"
-    response = get_llm_response(prompt, model)
+    response, _ = get_llm_response(prompt, model)
     assert "An error occurred" in response
 
 
+mock_embedding_client = mock_embedding_client()
+
 # Mocking OpenAI client for tests
-@patch("main.client", mock_client)
+@patch("main.embedding_client", mock_embedding_client)
 def test_get_embedding_response():
-    response = get_embedding_response("potato", "alias-embeddings")
+    response, _ = get_embedding_response("potato", "alias-embeddings")
     assert isinstance(response, list)
     assert response
