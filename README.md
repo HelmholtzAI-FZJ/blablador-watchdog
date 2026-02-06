@@ -18,12 +18,16 @@ OPENAI_BASE_URL=https://api.helmholtz-blablador.fz-juelich.de/v1
 ```
 
 
-## TODO 
+## TODO
 
-- [ ] Spawn a test for each model so github give me a better explanation for the failure
-- [ ] Differenciate between a model that is answering bullshit with a gpu failure.
-- [ ] Try with lowest temperature so model always answer the same
-- [ ] Make sure that all "base" models are working: `alias-fast`, `alias-large`, `alias-code` and `alias-embeddings`
+- [ ] Implement retry logic for failed requests with exponential backoff
+- [ ] Add CI/CD integration (GitHub Actions) for automated testing
+- [ ] Add configurable temperature parameter (currently hardcoded at 0.7)
+- [ ] Expand test coverage to include more edge cases and error scenarios
+- [ ] Add detailed error classification beyond CUDA/Internal Server errors
+- [ ] Add JSON output format for better integration with other tools
+- [ ] Add configurable timeout per model (currently global 45s)
+- [ ] Add historical performance tracking over multiple runs
 
 ## Embedding models
 Embedding models are routed to an embedding test (not chat) and configured in `embedding_models.py`.
