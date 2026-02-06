@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -36,6 +37,20 @@ def get_available_models():
         return []
 
 
+def extract_usage_tokens(response):
+    usage = getattr(response, "usage", None)
+    if not usage:
+        return None
+    total_tokens = getattr(usage, "total_tokens", None)
+    if total_tokens is not None:
+        return total_tokens
+    prompt_tokens = getattr(usage, "prompt_tokens", None)
+    completion_tokens = getattr(usage, "completion_tokens", None)
+    if prompt_tokens is not None or completion_tokens is not None:
+        return (prompt_tokens or 0) + (completion_tokens or 0)
+    return None
+
+
 def get_llm_response(prompt, model):
     response = None
     try:
@@ -59,7 +74,7 @@ def get_llm_response(prompt, model):
             message = getattr(response.choices[0], "message", None)
             content = getattr(message, "content", None) if message else None
             if isinstance(content, str):
-                return content.strip()
+                return content.strip(), extract_usage_tokens(response)
             reasoning = None
             if message:
                 reasoning = (
@@ -73,12 +88,12 @@ def get_llm_response(prompt, model):
                     message = getattr(response.choices[0], "message", None)
                     content = getattr(message, "content", None) if message else None
                     if isinstance(content, str):
-                        return content.strip()
-            return "An error occurred: Empty response content from LLM"
+                        return content.strip(), extract_usage_tokens(response)
+            return "An error occurred: Empty response content from LLM", None
         else:
-            return "An error occurred: Invalid response from LLM"
+            return "An error occurred: Invalid response from LLM", None
     except UnboundLocalError as e:
-        return ""
+        return "", None
     except Exception as e:
         extra = ""
         if 'response' in locals() and response and hasattr(response, 'choices') and response.choices:
@@ -89,7 +104,7 @@ def get_llm_response(prompt, model):
                     extra = f" on {content}"
             except Exception:
                 extra = ""
-        return f"An error occurred: {str(e)}{extra}"
+        return f"An error occurred: {str(e)}{extra}", None
 
 
 def get_embedding_response(text, model):
@@ -102,49 +117,50 @@ def get_embedding_response(text, model):
         if response and hasattr(response, "data") and response.data:
             embedding = getattr(response.data[0], "embedding", None)
             if isinstance(embedding, list) and embedding:
-                return embedding
-            return "An error occurred: Empty embedding response"
+                return embedding, extract_usage_tokens(response)
+            return "An error occurred: Empty embedding response", None
         else:
-            return "An error occurred: Invalid embedding response"
+            return "An error occurred: Invalid embedding response", None
     except UnboundLocalError as e:
-        return ""
+        return "", None
     except Exception as e:
-        return f"An error occurred: {str(e)}"
+        return f"An error occurred: {str(e)}", None
 
 
 def check_model(model, word, prompt):
     if is_embedding_model(model):
-        response = get_embedding_response(word, model)
+        response, tokens_used = get_embedding_response(word, model)
         if response == "An error occurred: Empty embedding response":
-            return False, response
+            return False, response, tokens_used
         if response == "An error occurred: Invalid embedding response":
-            return False, response
+            return False, response, tokens_used
         if isinstance(response, list):
-            return True, response
+            return True, response, tokens_used
         if "CUDA error:" in response:
-            return False, response
+            return False, response, tokens_used
         if "Internal Server Error" in response:
-            return False, response
-        return False, response
+            return False, response, tokens_used
+        return False, response, tokens_used
 
-    response = get_llm_response(prompt, model)
+    response, tokens_used = get_llm_response(prompt, model)
     if response == "An error occurred: Empty response content from LLM":
-        return False, response
+        return False, response, tokens_used
     if response == "An error occurred: Invalid response from LLM":
-        return False, response
+        return False, response, tokens_used
     if word.lower() in response.lower():
-        return True, response
+        return True, response, tokens_used
     if "CUDA error:" in response:
-        return False, response
+        return False, response, tokens_used
     if "Internal Server Error" in response:
-        return False, response
-    return False, response
+        return False, response, tokens_used
+    return False, response, tokens_used
 
 
 class ModelStatus(Static):
     def __init__(self, model):
         self.model = model
         self.status = "PENDING"
+        self.elapsed = None
         super().__init__("", classes="pending")
 
     def render(self):
@@ -180,6 +196,14 @@ class ModelStatus(Static):
             self.add_class("fail")
         else:
             self.add_class("pending")
+
+    def set_elapsed(self, elapsed):
+        self.elapsed = elapsed
+        if elapsed is None:
+            self.border_title = ""
+        else:
+            self.border_title = f"{elapsed:.2f}s"
+        self.refresh()
 
 
 class WatchdogApp(App):
@@ -290,36 +314,66 @@ class WatchdogApp(App):
         successes = []
         failures = []
 
+        def format_tokens_per_s(value):
+            if value is None:
+                return "n/a"
+            return f"{value:.1f} tok/s"
+
+        def tokens_sort_key(tokens_per_s):
+            if tokens_per_s is None:
+                return -1
+            return tokens_per_s
+
         async def check_one(model: str):
+            start = time.monotonic()
             try:
-                ok, response = await asyncio.wait_for(
+                ok, response, tokens_used = await asyncio.wait_for(
                     asyncio.to_thread(check_model, model, word, prompt),
                     timeout=45.0,
                 )
             except asyncio.TimeoutError:
-                return model, False, "Timeout after 45s"
-            return model, ok, response
+                elapsed = time.monotonic() - start
+                return model, False, "Timeout after 45s", elapsed, None
+            elapsed = time.monotonic() - start
+            return model, ok, response, elapsed, tokens_used
 
         tasks = [asyncio.create_task(check_one(model)) for model in self.models]
         total = len(tasks)
         for index, task in enumerate(asyncio.as_completed(tasks), start=1):
-            model, ok, response = await task
+            model, ok, response, elapsed, tokens_used = await task
             if self.status_line:
                 self.status_line.update(f"Testing {index}/{total}: {model}")
             widget = self.model_widgets.get(model)
             if widget:
                 widget.set_status("OK" if ok else "FAIL")
+                widget.set_elapsed(elapsed)
+            tokens_per_s = None
+            if tokens_used and elapsed and elapsed > 0:
+                tokens_per_s = tokens_used / elapsed
             if ok:
-                successes.append(model)
+                successes.append((model, elapsed, tokens_per_s))
             else:
-                failures.append((model, response))
+                failures.append((model, response, elapsed, tokens_per_s))
+
+        successes.sort(key=lambda item: tokens_sort_key(item[2]), reverse=True)
+        failures.sort(key=lambda item: tokens_sort_key(item[3]), reverse=True)
 
         report_lines = [f"Successes ({len(successes)}):"]
-        report_lines.extend(successes or ["- none"])
+        if successes:
+            report_lines.extend(
+                f"{model} :: {elapsed:.2f}s :: {format_tokens_per_s(tokens_per_s)}"
+                for model, elapsed, tokens_per_s in successes
+            )
+        else:
+            report_lines.append("- none")
         report_lines.extend(["", f"Failures ({len(failures)}):"])
         if failures:
             report_lines.extend(
-                f"{model} :: {error}" for model, error in failures
+                (
+                    f"{model} :: {error} :: {elapsed:.2f}s :: "
+                    f"{format_tokens_per_s(tokens_per_s)}"
+                )
+                for model, error, elapsed, tokens_per_s in failures
             )
         else:
             report_lines.append("- none")
