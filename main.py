@@ -60,20 +60,28 @@ def extract_usage_tokens(response):
 def get_llm_response(prompt, model):
     response = None
     try:
+        def is_qwen3_model(m):
+            return "qwen3" in m.lower() or "alias-code" in m.lower() or "alias_large" in m.lower()
+
         def request_completion(max_tokens):
-            return client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
-                top_p=1,
-                n=1,
-                max_tokens=max_tokens,
-                stop=None,
-                stream=False,
-                presence_penalty=0,
-                frequency_penalty=0,
-                reasoning_effort="low",
-            )
+            kwargs = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.7,
+                "top_p": 0.8,
+                "n": 1,
+                "max_tokens": max_tokens,
+                "stop": None,
+                "stream": False,
+                "presence_penalty": 1.5,
+                "frequency_penalty": 0,
+            }
+            if is_qwen3_model(model):
+                kwargs["extra_body"] = {
+                    "top_k": 20,
+                    "chat_template_kwargs": {"enable_thinking": False},
+                }
+            return client.chat.completions.create(**kwargs)
 
         response = request_completion(30)
         if response and hasattr(response, 'choices') and response.choices:
