@@ -19,7 +19,9 @@ client = OpenAI(
 
 embedding_client = OpenAI(
     api_key=os.getenv("EMBEDDINGS_API_KEY") or os.getenv("API_KEY"),
-    base_url=os.getenv("OPENAI_EMBEDDINGS_BASE_URL") or os.getenv("OPENAI_BASE_URL"),
+    base_url=(
+        os.getenv("OPENAI_EMBEDDINGS_BASE_URL") or os.getenv("OPENAI_BASE_URL")
+    ),
 )
 
 
@@ -31,13 +33,16 @@ def is_embedding_model(model):
 
 def get_available_models():
     try:
-        print(f"DEBUG: Fetching models from {os.getenv('OPENAI_BASE_URL')}...", flush=True)
+        base_url = os.getenv("OPENAI_BASE_URL")
+        print(f"DEBUG: Fetching models from {base_url}...", flush=True)
         models = client.models.list()
         model_list = [model.id for model in models.data]
-        print(f"DEBUG: Found {len(model_list)} models: {model_list}", flush=True)
+        msg = f"DEBUG: Found {len(model_list)} models: {model_list}"
+        print(msg, flush=True)
         return model_list
     except Exception as e:
-        print(f"DEBUG: Error fetching models: {type(e).__name__}: {str(e)}", flush=True)
+        err_msg = f"DEBUG: Error fetching models: {type(e).__name__}: {str(e)}"
+        print(err_msg, flush=True)
         import traceback
         traceback.print_exc()
         return []
@@ -61,7 +66,11 @@ def get_llm_response(prompt, model):
     response = None
     try:
         def is_qwen3_model(m):
-            return "qwen3" in m.lower() or "alias-code" in m.lower() or "alias-large" in m.lower()
+            return (
+                "qwen3" in m.lower()
+                or "alias-code" in m.lower()
+                or "alias-large" in m.lower()
+            )
 
         def request_completion(max_tokens):
             kwargs = {
@@ -98,23 +107,31 @@ def get_llm_response(prompt, model):
             finish_reason = getattr(response.choices[0], "finish_reason", None)
             if reasoning and finish_reason == "length":
                 response = request_completion(256)
-                if response and hasattr(response, "choices") and response.choices:
+                has_choices = response and hasattr(response, "choices")
+                if has_choices and response.choices:
                     message = getattr(response.choices[0], "message", None)
-                    content = getattr(message, "content", None) if message else None
-                    if isinstance(content, str):
+                    content = getattr(message, "content", None)
+                    if message and isinstance(content, str):
                         return content.strip(), extract_usage_tokens(response)
             return "An error occurred: Empty response content from LLM", None
         else:
             return "An error occurred: Invalid response from LLM", None
-    except UnboundLocalError as e:
+    except UnboundLocalError:
         return "", None
     except Exception as e:
         extra = ""
-        if 'response' in locals() and response and hasattr(response, 'choices') and response.choices:
+        has_choices = (
+            "response" in locals()
+            and response
+            and hasattr(response, "choices")
+            and response.choices
+        )
+        if has_choices:
             try:
-                message = getattr(response.choices[0], "message", None)
-                content = getattr(message, "content", None) if message else None
-                if isinstance(content, str):
+                first_choice = response.choices[0]
+                message = getattr(first_choice, "message", None)
+                content = getattr(message, "content", None)
+                if message and isinstance(content, str):
                     extra = f" on {content}"
             except Exception:
                 extra = ""
@@ -135,7 +152,7 @@ def get_embedding_response(text, model):
             return "An error occurred: Empty embedding response", None
         else:
             return "An error occurred: Invalid embedding response", None
-    except UnboundLocalError as e:
+    except UnboundLocalError:
         return "", None
     except Exception as e:
         return f"An error occurred: {str(e)}", None
@@ -185,7 +202,8 @@ class ModelStatus(Static):
             grid_padding = 4
             cell_padding = 4
             border_width = 2
-            available = self.app.size.width - grid_padding - (columns - 1) * gutter
+            available = self.app.size.width - grid_padding
+            available -= (columns - 1) * gutter
             column_width = max(available // columns, 1)
             max_width = max(column_width - cell_padding - border_width, 4)
 
@@ -351,7 +369,9 @@ class WatchdogApp(App):
             elapsed = time.monotonic() - start
             return model, ok, response, elapsed, tokens_used
 
-        tasks = [asyncio.create_task(check_one(model)) for model in self.models]
+        tasks = [
+            asyncio.create_task(check_one(model)) for model in self.models
+        ]
         total = len(tasks)
         for index, task in enumerate(asyncio.as_completed(tasks), start=1):
             model, ok, response, elapsed, tokens_used = await task
@@ -374,10 +394,10 @@ class WatchdogApp(App):
 
         report_lines = [f"Successes ({len(successes)}):"]
         if successes:
-            report_lines.extend(
-                f"{model} :: {elapsed:.2f}s :: {format_tokens_per_s(tokens_per_s)}"
-                for model, elapsed, tokens_per_s in successes
-            )
+            for model, elapsed, tokens_per_s in successes:
+                tps_str = format_tokens_per_s(tokens_per_s)
+                line = f"{model} :: {elapsed:.2f}s :: {tps_str}"
+                report_lines.append(line)
         else:
             report_lines.append("- none")
         report_lines.extend(["", f"Failures ({len(failures)}):"])
@@ -396,8 +416,10 @@ class WatchdogApp(App):
 
 
 async def run_quiet():
-    print(f"DEBUG: API_KEY set: {bool(os.getenv('API_KEY'))}", flush=True)
-    print(f"DEBUG: OPENAI_BASE_URL: {os.getenv('OPENAI_BASE_URL', 'not set')}", flush=True)
+    has_api_key = bool(os.getenv("API_KEY"))
+    print(f"DEBUG: API_KEY set: {has_api_key}", flush=True)
+    base_url = os.getenv("OPENAI_BASE_URL", "not set")
+    print(f"DEBUG: OPENAI_BASE_URL: {base_url}", flush=True)
     word = "potato"
     prompt = (
         f"Give me ONLY a word. The word is {word}. Nothing else. "
@@ -451,7 +473,8 @@ async def run_quiet():
     print(f"\nFailures ({len(failures)}):")
     if failures:
         for model, error, elapsed, tokens_per_s in failures:
-            print(f"  {model} :: {error} :: {elapsed:.2f}s :: {fmt_tps(tokens_per_s)}")
+            tps_str = fmt_tps(tokens_per_s)
+            print(f"  {model} :: {error} :: {elapsed:.2f}s :: {tps_str}")
     else:
         print("  - none")
 

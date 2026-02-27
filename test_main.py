@@ -1,5 +1,7 @@
 from unittest.mock import patch
+
 from main import get_available_models, get_llm_response, get_embedding_response
+
 
 # Mocking OpenAI client
 class MockOpenAI:
@@ -28,6 +30,7 @@ class MockOpenAI:
 
 def mock_embedding_client():
     return MockOpenAI("mock_api_key", "mock_base_url")
+
 
 class ModelsResponse:
     def __init__(self):
@@ -67,10 +70,13 @@ class MockModel:
     def __init__(self, id):
         self.id = id
 
+
 def mock_openai_client():
     return MockOpenAI("mock_api_key", "mock_base_url")
 
+
 mock_client = mock_openai_client()
+
 
 # Mocking OpenAI client for tests
 @patch("main.client", mock_client)
@@ -79,6 +85,7 @@ def test_get_available_models():
     assert "alias-fast" in models
     assert "alias-embeddings" in models
 
+
 # Mocking OpenAI client for tests
 @patch("main.client", mock_client)
 def test_get_llm_response():
@@ -86,6 +93,7 @@ def test_get_llm_response():
     model = "alias-fast"
     response, _ = get_llm_response(prompt, model)
     assert "Potato" in response
+
 
 # Mocking OpenAI client for tests
 @patch("main.client", mock_client)
@@ -97,6 +105,7 @@ def test_get_llm_response_error():
 
 
 mock_embedding_client = mock_embedding_client()
+
 
 # Mocking OpenAI client for tests
 @patch("main.embedding_client", mock_embedding_client)
