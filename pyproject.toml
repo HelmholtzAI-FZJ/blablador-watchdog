@@ -1,0 +1,22 @@
+[project]
+name = "blablador-watchdog"
+version = "0.1.0"
+description = "Monitor blablador model availability"
+requires-python = ">=3.10"
+dependencies = [
+    "openai",
+    "python-dotenv",
+    "textual",
+]
+
+[project.optional-dependencies]
+dev = [
+    "flake8",
+    "pytest",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "flake8",
+    "pytest",
+]

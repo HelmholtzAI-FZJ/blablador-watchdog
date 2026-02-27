@@ -6,9 +6,19 @@ This checks if blablador is working correctly by asking each model for a word. E
 ./run.sh
 ```
 
-## Requirements
-- uv: `pip install uv`
-- openai, dotenv, textual: `uv pip install openai python-dotenv textual flake8 pytest`
+## Installation
+
+```bash
+# Install uv if you don't have it
+pip install uv
+
+# Create virtual environment and install dependencies
+uv venv
+uv sync
+
+# Install dev dependencies (for testing/linting)
+uv sync --extra dev
+```
 
 ## Configuration
 Create a `.env` file with the following content:
