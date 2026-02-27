@@ -61,7 +61,7 @@ def get_llm_response(prompt, model):
     response = None
     try:
         def is_qwen3_model(m):
-            return "qwen3" in m.lower() or "alias-code" in m.lower() or "alias_large" in m.lower()
+            return "qwen3" in m.lower() or "alias-code" in m.lower() or "alias-large" in m.lower()
 
         def request_completion(max_tokens):
             kwargs = {
