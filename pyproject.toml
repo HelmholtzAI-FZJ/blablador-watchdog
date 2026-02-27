@@ -20,3 +20,6 @@ dev-dependencies = [
     "flake8",
     "pytest",
 ]
+
+[tool.flake8]
+exclude = [".venv", "venv", "__pycache__", ".git"]
