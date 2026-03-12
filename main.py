@@ -9,6 +9,7 @@ from textual.containers import Container
 from textual.widgets import Static
 
 from embedding_models import EMBEDDING_MODELS
+from metrics import record_metric
 
 load_dotenv()
 
@@ -384,6 +385,10 @@ class WatchdogApp(App):
             tokens_per_s = None
             if tokens_used and elapsed and elapsed > 0:
                 tokens_per_s = tokens_used / elapsed
+            error_msg = None if ok else response
+            await record_metric(
+                model, ok, elapsed, tokens_used, tokens_per_s, error_msg
+            )
             if ok:
                 successes.append((model, elapsed, tokens_per_s))
             else:
@@ -452,6 +457,10 @@ async def run_quiet():
         tokens_per_s = None
         if tokens_used and elapsed and elapsed > 0:
             tokens_per_s = tokens_used / elapsed
+        error_msg = None if ok else response
+        await record_metric(
+            model, ok, elapsed, tokens_used, tokens_per_s, error_msg
+        )
         if ok:
             successes.append((model, elapsed, tokens_per_s))
         else:
