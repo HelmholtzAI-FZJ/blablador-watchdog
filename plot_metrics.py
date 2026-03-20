@@ -59,7 +59,7 @@ async def main():
     ax1.set_ylabel("Response Time (seconds)")
     ax1.set_title("Response Time over Time")
     ax1.legend(loc="upper left", fontsize=6)
-    ax1.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
     ax1.tick_params(axis="x", rotation=45)
     ax1.grid(True, alpha=0.3)
 
@@ -77,7 +77,7 @@ async def main():
     ax2.set_ylabel("Tokens/second")
     ax2.set_title("Throughput (Tokens/sec) over Time")
     ax2.legend(loc="upper left", fontsize=6)
-    ax2.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
     ax2.tick_params(axis="x", rotation=45)
     ax2.grid(True, alpha=0.3)
 
