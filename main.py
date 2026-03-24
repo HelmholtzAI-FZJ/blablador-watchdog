@@ -1,6 +1,7 @@
 import asyncio
 import os
 import time
+import random
 
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -12,6 +13,85 @@ from embedding_models import EMBEDDING_MODELS
 from metrics import record_metric
 
 load_dotenv()
+
+# Retry configuration
+MAX_RETRIES = 3
+INITIAL_DELAY = 1.0  # seconds
+MAX_DELAY = 10.0  # seconds
+BACKOFF_FACTOR = 2.0
+
+
+def is_retriable_error(error: Exception) -> bool:
+    """Determine if an error is retriable."""
+    error_str = str(error).lower()
+    
+    # Rate limit errors
+    if "rate_limit" in error_str or "rate limit" in error_str:
+        return True
+    if "429" in error_str:
+        return True
+    
+    # Server errors (5xx)
+    if "500" in error_str or "502" in error_str or "503" in error_str or "504" in error_str:
+        return True
+    if "internal server error" in error_str:
+        return True
+    if "bad gateway" in error_str:
+        return True
+    if "service unavailable" in error_str:
+        return True
+    if "gateway timeout" in error_str:
+        return True
+    
+    # Network errors
+    if "connection" in error_str:
+        return True
+    if "timeout" in error_str:
+        return True
+    if "reset" in error_str or "refused" in error_str:
+        return True
+    
+    # CUDA errors (can be transient)
+    if "cuda" in error_str:
+        return True
+    
+    return False
+
+
+def retry_with_exponential_backoff(func):
+    """Decorator to retry a function with exponential backoff."""
+    def wrapper(*args, **kwargs):
+        last_exception = None
+        delay = INITIAL_DELAY
+        
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                last_exception = e
+                
+                if attempt == MAX_RETRIES:
+                    # Last attempt failed, don't retry
+                    break
+                
+                if not is_retriable_error(e):
+                    # Non-retriable error, don't retry
+                    break
+                
+                # Add jitter to avoid thundering herd
+                jitter = random.uniform(0, 0.5)
+                sleep_time = min(delay + jitter, MAX_DELAY)
+                
+                print(f"  Retry {attempt + 1}/{MAX_RETRIES} after {sleep_time:.1f}s "
+                      f"due to: {type(e).__name__}: {str(e)[:100]}", flush=True)
+                
+                time.sleep(sleep_time)
+                delay *= BACKOFF_FACTOR
+        
+        # All retries exhausted, raise the last exception
+        raise last_exception
+    
+    return wrapper
 
 client = OpenAI(
     api_key=os.getenv("API_KEY"),
@@ -32,6 +112,7 @@ def is_embedding_model(model):
     return model in EMBEDDING_MODELS
 
 
+@retry_with_exponential_backoff
 def get_available_models():
     try:
         base_url = os.getenv("OPENAI_BASE_URL")
@@ -63,6 +144,7 @@ def extract_usage_tokens(response):
     return None
 
 
+@retry_with_exponential_backoff
 def get_llm_response(prompt, model):
     response = None
     try:
@@ -139,6 +221,7 @@ def get_llm_response(prompt, model):
         return f"An error occurred: {str(e)}{extra}", None
 
 
+@retry_with_exponential_backoff
 def get_embedding_response(text, model):
     response = None
     try:

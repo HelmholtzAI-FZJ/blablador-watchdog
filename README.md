@@ -30,7 +30,7 @@ OPENAI_BASE_URL=https://api.helmholtz-blablador.fz-juelich.de/v1
 
 ## TODO
 
-- [ ] Implement retry logic for failed requests with exponential backoff
+- [x] Implement retry logic for failed requests with exponential backoff
 - [x] Add CI/CD integration (GitHub Actions) for automated testing
 - [ ] Add configurable temperature parameter (currently hardcoded at 0.7)
 - [ ] Expand test coverage to include more edge cases and error scenarios
