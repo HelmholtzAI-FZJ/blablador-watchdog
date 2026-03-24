@@ -41,3 +41,28 @@ OPENAI_BASE_URL=https://api.helmholtz-blablador.fz-juelich.de/v1
 
 ## Embedding models
 Embedding models are routed to an embedding test (not chat) and configured in `embedding_models.py`.
+
+## Cluster Usage Monitoring
+
+The `monitor-cluster.sh` script provides comprehensive monitoring of cluster usage, including active users, rate limits, throttling status, and model usage analytics.
+
+**Key features:**
+- Automatic port-forwarding (no manual setup needed)
+- User status classification (superuser, internal, external, etc.)
+- Multiple output formats (text and JSON)
+- Detailed diagnostics and error handling
+
+See the [full documentation](docs/monitor-cluster.md) for more details.
+
+### Quick Start
+
+```bash
+# Run the script (auto-starts port-forward if needed)
+./monitor-cluster.sh
+
+# Get a summary
+./monitor-cluster.sh summary
+
+# View active users
+./monitor-cluster.sh active-users --limit 10
+```
