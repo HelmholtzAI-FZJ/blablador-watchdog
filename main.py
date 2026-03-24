@@ -21,41 +21,54 @@ MAX_DELAY = 10.0  # seconds
 BACKOFF_FACTOR = 2.0
 
 
-def is_retriable_error(error: Exception) -> bool:
-    """Determine if an error is retriable."""
+def is_retriable_error(error: Exception) -> tuple[bool, float | None]:
+    """Determine if an error is retriable. Returns (is_retriable, retry_after_seconds)."""
     error_str = str(error).lower()
+    retry_after = None
+    
+    # Try to extract Retry-After from the error response
+    # OpenAI SDK wraps the response in the exception
+    if hasattr(error, 'response') and error.response is not None:
+        response = error.response
+        if hasattr(response, 'headers'):
+            retry_after_header = response.headers.get('Retry-After')
+            if retry_after_header:
+                try:
+                    retry_after = float(retry_after_header)
+                except ValueError:
+                    pass
     
     # Rate limit errors
     if "rate_limit" in error_str or "rate limit" in error_str:
-        return True
+        return True, retry_after
     if "429" in error_str:
-        return True
+        return True, retry_after
     
     # Server errors (5xx)
     if "500" in error_str or "502" in error_str or "503" in error_str or "504" in error_str:
-        return True
+        return True, retry_after
     if "internal server error" in error_str:
-        return True
+        return True, retry_after
     if "bad gateway" in error_str:
-        return True
+        return True, retry_after
     if "service unavailable" in error_str:
-        return True
+        return True, retry_after
     if "gateway timeout" in error_str:
-        return True
+        return True, retry_after
     
     # Network errors
     if "connection" in error_str:
-        return True
+        return True, retry_after
     if "timeout" in error_str:
-        return True
+        return True, retry_after
     if "reset" in error_str or "refused" in error_str:
-        return True
+        return True, retry_after
     
     # CUDA errors (can be transient)
     if "cuda" in error_str:
-        return True
+        return True, retry_after
     
-    return False
+    return False, None
 
 
 def retry_with_exponential_backoff(func):
@@ -74,19 +87,29 @@ def retry_with_exponential_backoff(func):
                     # Last attempt failed, don't retry
                     break
                 
-                if not is_retriable_error(e):
+                is_retriable, retry_after = is_retriable_error(e)
+                if not is_retriable:
                     # Non-retriable error, don't retry
                     break
                 
-                # Add jitter to avoid thundering herd
-                jitter = random.uniform(0, 0.5)
-                sleep_time = min(delay + jitter, MAX_DELAY)
-                
-                print(f"  Retry {attempt + 1}/{MAX_RETRIES} after {sleep_time:.1f}s "
-                      f"due to: {type(e).__name__}: {str(e)[:100]}", flush=True)
+                # Use Retry-After header if provided (for rate limits), otherwise use backoff
+                if retry_after is not None and retry_after > 0:
+                    sleep_time = min(retry_after, MAX_DELAY)
+                    print(f"  Retry {attempt + 1}/{MAX_RETRIES} after {sleep_time:.1f}s "
+                          f"(from Retry-After header) due to: {type(e).__name__}: {str(e)[:100]}", flush=True)
+                else:
+                    # Add jitter to avoid thundering herd
+                    jitter = random.uniform(0, 0.5)
+                    sleep_time = min(delay + jitter, MAX_DELAY)
+                    
+                    print(f"  Retry {attempt + 1}/{MAX_RETRIES} after {sleep_time:.1f}s "
+                          f"due to: {type(e).__name__}: {str(e)[:100]}", flush=True)
+                    
+                    # Only increase delay if we didn't use Retry-After
+                    if retry_after is None:
+                        delay *= BACKOFF_FACTOR
                 
                 time.sleep(sleep_time)
-                delay *= BACKOFF_FACTOR
         
         # All retries exhausted, raise the last exception
         raise last_exception

@@ -33,7 +33,7 @@ OPENAI_BASE_URL=https://api.helmholtz-blablador.fz-juelich.de/v1
 - [x] Implement retry logic for failed requests with exponential backoff
 - [x] Add CI/CD integration (GitHub Actions) for automated testing
 - [ ] Add configurable temperature parameter (currently hardcoded at 0.7)
-- [ ] Expand test coverage to include more edge cases and error scenarios
+- [x] Expand test coverage to include more edge cases and error scenarios
 - [ ] Add detailed error classification beyond CUDA/Internal Server errors
 - [x] Add JSON output format for better integration with other tools
 - [ ] Add configurable timeout per model (currently global 45s)
