@@ -22,10 +22,14 @@ async def get_all_metrics(db_path: str = DEFAULT_DB_PATH) -> list[dict]:
             return [dict(row) for row in rows]
 
 
-def shorten_model_name(name: str, max_len: int = 25) -> str:
+def shorten_model_name(name: str, max_len: int = 10) -> str:
     if len(name) <= max_len:
         return name
     return name[:max_len-3] + "..."
+
+
+# Different marker shapes for different models (enough for 30 models)
+MARKERS = ["o", "s", "^", "v", "D", "*", "P", "X", "h", "8", ">", "<", "d", "p", "H", "x", "1", "2", "3", "4", "+", "o", "s", "^", "v", "D", "*", "P", "X", "h"]
 
 
 async def main():
@@ -38,22 +42,30 @@ async def main():
         m["timestamp_dt"] = datetime.fromisoformat(m["timestamp"])
         m["short_model"] = shorten_model_name(m["model"])
 
-    models = list(set(m["short_model"] for m in metrics))
-    colors = plt.cm.tab20(range(len(models)))
-    model_colors = dict(zip(models, colors))
+    # Get unique full model names (not shortened)
+    models_full = list(set(m["model"] for m in metrics))
+    
+    # Get unique short model names for display
+    models_short = list(set(m["short_model"] for m in metrics))
+    
+    # Create color and marker maps based on short model names (for display)
+    num_models = len(models_short)
+    colors = plt.cm.tab20(range(num_models))
+    model_colors = dict(zip(models_short, colors))
+    model_markers = dict(zip(models_short, MARKERS[:num_models]))
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     fig.suptitle("Model Metrics Dashboard", fontsize=14, fontweight="bold")
 
     ax1 = axes[0, 0]
-    for model in models:
-        model_data = [m for m in metrics if m["short_model"] == model]
+    for model_short in models_short:
+        model_data = [m for m in metrics if m["short_model"] == model_short]
         ax1.plot(
             [m["timestamp_dt"] for m in model_data],
             [m["elapsed_seconds"] for m in model_data],
-            marker="o",
-            label=model,
-            color=model_colors[model],
+            marker=model_markers[model_short],
+            label=model_short,
+            color=model_colors[model_short],
         )
     ax1.set_xlabel("Time")
     ax1.set_ylabel("Response Time (seconds)")
@@ -64,14 +76,14 @@ async def main():
     ax1.grid(True, alpha=0.3)
 
     ax2 = axes[0, 1]
-    for model in models:
-        model_data = [m for m in metrics if m["short_model"] == model]
+    for model_short in models_short:
+        model_data = [m for m in metrics if m["short_model"] == model_short]
         ax2.plot(
             [m["timestamp_dt"] for m in model_data],
             [m["tokens_per_second"] for m in model_data],
-            marker="s",
-            label=model,
-            color=model_colors[model],
+            marker=model_markers[model_short],
+            label=model_short,
+            color=model_colors[model_short],
         )
     ax2.set_xlabel("Time")
     ax2.set_ylabel("Tokens/second")
@@ -83,11 +95,11 @@ async def main():
 
     ax3 = axes[1, 0]
     success_counts = {}
-    for model in models:
-        model_data = [m for m in metrics if m["short_model"] == model]
+    for model_short in models_short:
+        model_data = [m for m in metrics if m["short_model"] == model_short]
         success = sum(1 for m in model_data if m["success"])
         total = len(model_data)
-        success_counts[model] = success / total * 100 if total > 0 else 0
+        success_counts[model_short] = success / total * 100 if total > 0 else 0
     bars = ax3.bar(success_counts.keys(), success_counts.values(), color=[model_colors[m] for m in success_counts])
     ax3.set_xlabel("Model")
     ax3.set_ylabel("Success Rate (%)")
@@ -99,10 +111,10 @@ async def main():
 
     ax4 = axes[1, 1]
     avg_times = {}
-    for model in models:
-        model_data = [m for m in metrics if m["short_model"] == model]
+    for model_short in models_short:
+        model_data = [m for m in metrics if m["short_model"] == model_short]
         times = [m["elapsed_seconds"] for m in model_data if m["elapsed_seconds"] is not None]
-        avg_times[model] = sum(times) / len(times) if times else 0
+        avg_times[model_short] = sum(times) / len(times) if times else 0
     bars = ax4.barh(avg_times.keys(), avg_times.values(), color=[model_colors[m] for m in avg_times])
     ax4.set_xlabel("Avg Response Time (seconds)")
     ax4.set_title("Average Response Time by Model")
