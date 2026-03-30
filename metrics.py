@@ -1,6 +1,7 @@
 import aiosqlite
 import os
 from datetime import datetime, timezone
+from typing import Optional, List
 
 DEFAULT_DB_PATH = os.path.expanduser("~/.blablador_watchdog/metrics.db")
 
@@ -34,10 +35,10 @@ async def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
 async def record_metric(
     model: str,
     success: bool,
-    elapsed_seconds: float | None,
-    tokens_used: int | None,
-    tokens_per_second: float | None,
-    error: str | None = None,
+    elapsed_seconds: Optional[float],
+    tokens_used: Optional[int],
+    tokens_per_second: Optional[float],
+    error: Optional[str] = None,
     db_path: str = DEFAULT_DB_PATH,
 ) -> None:
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
@@ -79,10 +80,10 @@ async def record_metric(
 
 
 async def get_recent_metrics(
-    model: str | None = None,
+    model: Optional[str] = None,
     limit: int = 100,
     db_path: str = DEFAULT_DB_PATH,
-) -> list[dict]:
+) -> List[dict]:
     if not os.path.exists(db_path):
         return []
     async with aiosqlite.connect(db_path) as db:

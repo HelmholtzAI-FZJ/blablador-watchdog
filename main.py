@@ -2,6 +2,7 @@ import asyncio
 import os
 import time
 import random
+from typing import Optional, Tuple
 
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -21,7 +22,7 @@ MAX_DELAY = 10.0  # seconds
 BACKOFF_FACTOR = 2.0
 
 
-def is_retriable_error(error: Exception) -> tuple[bool, float | None]:
+def is_retriable_error(error: Exception) -> Tuple[bool, Optional[float]]:
     """Determine if an error is retriable. Returns (is_retriable, retry_after_seconds)."""
     error_str = str(error).lower()
     retry_after = None
