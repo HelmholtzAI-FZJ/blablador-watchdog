@@ -42,6 +42,7 @@ Commands:
   rate-limits      Show current rate limit usage per user/model
   throttled        List throttled users
   models           Show which models are being used
+  banned-users     List all banned/blacklisted users
   all              Full cluster usage report
   help             Show this help message
 
@@ -239,6 +240,17 @@ cmd_summary() {
         blacklisted=0
     fi
     echo -e "Blacklisted users: ${RED}$blacklisted${NC}"
+
+    # Show banned users list if any
+    if [ "$blacklisted" -gt 0 ]; then
+        echo ""
+        echo -e "${YELLOW}Banned users:${NC}"
+        $REDIS_CLI HGETALL "access_control:users" 2>/dev/null | paste - - | while read -r email status; do
+            if [ "$status" = "blacklisted" ] || [ "$status" = "punished" ]; then
+                echo "  - $email ($status)"
+            fi
+        done
+    fi
     
     # Models used
     local model_count=$(get_active_models | wc -l | tr -d ' ')
@@ -422,6 +434,36 @@ cmd_models() {
     done
 }
 
+# Banned/blacklisted users
+cmd_banned_users() {
+    local limit="${1:-50}"
+    
+    print_header "Banned (Blacklisted) Users"
+    
+    # Get all users from access_control:users hash
+    local users=$($REDIS_CLI HGETALL "access_control:users" 2>/dev/null)
+    
+    if [ -z "$users" ]; then
+        echo "No banned users found"
+        return
+    fi
+    
+    local email_width=50
+    local status_width=12
+    
+    printf "${BLUE}%-*s${NC} | %-*s\n" "$email_width" "Email" "$status_width" "Status"
+    printf "%$((email_width + status_width + 3))s\n" | tr ' ' '-'
+    
+    # Parse HGETALL output (alternating key-value pairs)
+    echo "$users" | paste - - | while read -r email status; do
+        if [ "$status" = "blacklisted" ] || [ "$status" = "punished" ]; then
+            local email_display=$(printf "%-${email_width}s" "$email")
+            local status_formatted=$(format_status "$status")
+            printf "%s | %s\n" "$email_display" "$status_formatted"
+        fi
+    done | head -n "$limit"
+}
+
 # Full report
 cmd_all() {
     local limit="${1:-50}"
@@ -563,6 +605,9 @@ case "$COMMAND" in
         ;;
     throttled)
         cmd_throttled "$LIMIT"
+        ;;
+    banned-users)
+        cmd_banned_users "$LIMIT"
         ;;
     models)
         cmd_models
