@@ -41,6 +41,8 @@ source = { virtual = "." }
 dependencies = [
     { name = "aiosqlite" },
     { name = "openai" },
+    { name = "pygments" },
+    { name = "pytest" },
     { name = "python-dotenv" },
     { name = "textual" },
 ]
@@ -62,6 +64,8 @@ requires-dist = [
     { name = "aiosqlite" },
     { name = "flake8", marker = "extra == 'dev'" },
     { name = "openai" },
+    { name = "pygments", specifier = ">=2.19.2" },
+    { name = "pytest", specifier = ">=9.0.2" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "python-dotenv" },
     { name = "textual" },

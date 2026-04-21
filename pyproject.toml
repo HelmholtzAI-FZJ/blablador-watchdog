@@ -8,6 +8,8 @@ dependencies = [
     "python-dotenv",
     "textual",
     "aiosqlite",
+    "pytest>=9.0.2",
+    "pygments>=2.19.2",
 ]
 
 [project.optional-dependencies]
