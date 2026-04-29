@@ -2,7 +2,7 @@ import asyncio
 import os
 import time
 import random
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List, Dict
 
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -117,17 +117,74 @@ def retry_with_exponential_backoff(func):
     
     return wrapper
 
-client = OpenAI(
-    api_key=os.getenv("API_KEY"),
-    base_url=os.getenv("OPENAI_BASE_URL"),
-)
+# Multi-endpoint support
+def get_endpoints() -> List[Dict]:
+    """Parse multiple endpoints from environment variables."""
+    endpoints = []
+    
+    # Support both old single URL and new multi-URL format
+    base_urls_str = os.getenv("OPENAI_BASE_URLS") or os.getenv("OPENAI_BASE_URL")
+    if not base_urls_str:
+        return endpoints
+    
+    # Split by comma for multiple endpoints
+    base_urls = [url.strip() for url in base_urls_str.split(",")]
+    
+    # Get API keys (can be single or comma-separated)
+    api_keys_str = os.getenv("API_KEYS") or os.getenv("API_KEY")
+    if api_keys_str:
+        api_keys = [k.strip() for k in api_keys_str.split(",")]
+    else:
+        api_keys = []
+    
+    # Get embedding-specific keys/URLs
+    embeddings_api_keys_str = os.getenv("EMBEDDINGS_API_KEYS") or os.getenv("EMBEDDINGS_API_KEY")
+    if embeddings_api_keys_str:
+        embeddings_api_keys = [k.strip() for k in embeddings_api_keys_str.split(",")]
+    else:
+        embeddings_api_keys = []
+    
+    embeddings_base_urls_str = os.getenv("OPENAI_EMBEDDINGS_BASE_URLS") or os.getenv("OPENAI_EMBEDDINGS_BASE_URL")
+    if embeddings_base_urls_str:
+        embeddings_base_urls = [url.strip() for url in embeddings_base_urls_str.split(",")]
+    else:
+        embeddings_base_urls = []
+    
+    # Create endpoint configurations
+    for idx, base_url in enumerate(base_urls):
+        if not base_url:
+            continue
+            
+        # Use corresponding API key or fall back to first/any
+        api_key = api_keys[idx] if idx < len(api_keys) else (api_keys[0] if api_keys else os.getenv("API_KEY"))
+        
+        # Use corresponding embedding config or fall back to main endpoint
+        emb_api_key = embeddings_api_keys[idx] if idx < len(embeddings_api_keys) else (embeddings_api_keys[0] if embeddings_api_keys else api_key)
+        emb_base_url = embeddings_base_urls[idx] if idx < len(embeddings_base_urls) else base_url
+        
+        endpoints.append({
+            "id": idx,
+            "name": f"Endpoint-{idx+1}",
+            "base_url": base_url,
+            "api_key": api_key,
+            "embedding_api_key": emb_api_key,
+            "embedding_base_url": emb_base_url,
+            "client": OpenAI(api_key=api_key, base_url=base_url),
+            "embedding_client": OpenAI(api_key=emb_api_key, base_url=emb_base_url),
+            "models": [],
+        })
+    
+    return endpoints
 
-embedding_client = OpenAI(
-    api_key=os.getenv("EMBEDDINGS_API_KEY") or os.getenv("API_KEY"),
-    base_url=(
-        os.getenv("OPENAI_EMBEDDINGS_BASE_URL") or os.getenv("OPENAI_BASE_URL")
-    ),
-)
+# Global endpoint registry
+ENDPOINTS = get_endpoints()
+
+def get_endpoint_clients(endpoint_id: int = 0):
+    """Get client and embedding_client for a specific endpoint."""
+    if endpoint_id >= len(ENDPOINTS):
+        raise ValueError(f"Endpoint {endpoint_id} not found")
+    ep = ENDPOINTS[endpoint_id]
+    return ep["client"], ep["embedding_client"]
 
 
 def is_embedding_model(model):
@@ -136,22 +193,38 @@ def is_embedding_model(model):
     return model in EMBEDDING_MODELS
 
 
-@retry_with_exponential_backoff
-def get_available_models():
-    try:
-        base_url = os.getenv("OPENAI_BASE_URL")
-        print(f"DEBUG: Fetching models from {base_url}...", flush=True)
-        models = client.models.list()
-        model_list = [model.id for model in models.data]
-        msg = f"DEBUG: Found {len(model_list)} models: {model_list}"
-        print(msg, flush=True)
-        return model_list
-    except Exception as e:
-        err_msg = f"DEBUG: Error fetching models: {type(e).__name__}: {str(e)}"
-        print(err_msg, flush=True)
-        import traceback
-        traceback.print_exc()
-        return []
+def get_all_models_from_endpoints() -> List[Tuple[str, int]]:
+    """Fetch models from all configured endpoints.
+    Returns list of (model_id, endpoint_id) tuples.
+    """
+    all_models = []
+    
+    if not ENDPOINTS:
+        print("DEBUG: No endpoints configured", flush=True)
+        return all_models
+    
+    for ep in ENDPOINTS:
+        try:
+            client = ep["client"]
+            base_url = ep["base_url"]
+            print(f"DEBUG: Fetching models from {ep['name']} ({base_url})...", flush=True)
+            models = client.models.list()
+            model_list = [model.id for model in models.data]
+            msg = f"DEBUG: {ep['name']}: Found {len(model_list)} models: {model_list}"
+            print(msg, flush=True)
+            # Store models in endpoint registry
+            ep["models"] = model_list
+            # Add to all_models with endpoint ID
+            for model_id in model_list:
+                all_models.append((model_id, ep["id"]))
+        except Exception as e:
+            err_msg = f"DEBUG: {ep['name']}: Error fetching models: {type(e).__name__}: {str(e)}"
+            print(err_msg, flush=True)
+            import traceback
+            traceback.print_exc()
+            ep["models"] = []
+    
+    return all_models
 
 
 def extract_usage_tokens(response):
@@ -169,9 +242,11 @@ def extract_usage_tokens(response):
 
 
 @retry_with_exponential_backoff
-def get_llm_response(prompt, model):
+def get_llm_response(prompt, model, endpoint_id: int = 0):
     response = None
     try:
+        client, _ = get_endpoint_clients(endpoint_id)
+        
         def is_qwen3_model(m):
             return (
                 "qwen3" in m.lower()
@@ -246,9 +321,10 @@ def get_llm_response(prompt, model):
 
 
 @retry_with_exponential_backoff
-def get_embedding_response(text, model):
+def get_embedding_response(text, model, endpoint_id: int = 0):
     response = None
     try:
+        _, embedding_client = get_endpoint_clients(endpoint_id)
         response = embedding_client.embeddings.create(
             model=model,
             input=text,
@@ -266,9 +342,9 @@ def get_embedding_response(text, model):
         return f"An error occurred: {str(e)}", None
 
 
-def check_model(model, word, prompt):
+def check_model(model, word, prompt, endpoint_id: int = 0):
     if is_embedding_model(model):
-        response, tokens_used = get_embedding_response(word, model)
+        response, tokens_used = get_embedding_response(word, model, endpoint_id)
         if response == "An error occurred: Empty embedding response":
             return False, response, tokens_used
         if response == "An error occurred: Invalid embedding response":
@@ -281,7 +357,7 @@ def check_model(model, word, prompt):
             return False, response, tokens_used
         return False, response, tokens_used
 
-    response, tokens_used = get_llm_response(prompt, model)
+    response, tokens_used = get_llm_response(prompt, model, endpoint_id)
     if response == "An error occurred: Empty response content from LLM":
         return False, response, tokens_used
     if response == "An error occurred: Invalid response from LLM":
@@ -426,23 +502,27 @@ class WatchdogApp(App):
     async def load_models(self):
         if self.status_line:
             self.status_line.update("Loading models...")
-        models = await asyncio.to_thread(get_available_models)
-        self.models = models
+        models_with_endpoints = await asyncio.to_thread(get_all_models_from_endpoints)
+        self.models_with_endpoints = models_with_endpoints
         self.model_widgets = {}
 
-        if not models:
+        if not models_with_endpoints:
             if self.status_line:
                 self.status_line.update("No models available.")
             return
 
-        for model in models:
-            widget = ModelStatus(model)
+        # Group models by endpoint for display
+        for model, endpoint_id in models_with_endpoints:
+            endpoint_name = ENDPOINTS[endpoint_id]["name"] if endpoint_id < len(ENDPOINTS) else f"Endpoint-{endpoint_id}"
+            widget = ModelStatus(f"{model} [{endpoint_name}]")
+            widget.model = model  # Store original model name
+            widget.endpoint_id = endpoint_id  # Store endpoint ID
             self.model_widgets[model] = widget
             if self.grid:
                 self.grid.mount(widget)
 
         if self.status_line:
-            self.status_line.update(f"Testing {len(models)} models...")
+            self.status_line.update(f"Testing {len(models_with_endpoints)} model-endpoint pairs...")
         self.run_worker(self.run_checks(), exclusive=True)
 
     async def run_checks(self):
@@ -464,27 +544,33 @@ class WatchdogApp(App):
                 return -1
             return tokens_per_s
 
-        async def check_one(model: str):
+        async def check_one(model: str, endpoint_id: int):
             start = time.monotonic()
             try:
                 ok, response, tokens_used = await asyncio.wait_for(
-                    asyncio.to_thread(check_model, model, word, prompt),
+                    asyncio.to_thread(check_model, model, word, prompt, endpoint_id),
                     timeout=45.0,
                 )
             except asyncio.TimeoutError:
                 elapsed = time.monotonic() - start
-                return model, False, "Timeout after 45s", elapsed, None
+                return model, endpoint_id, False, "Timeout after 45s", elapsed, None
             elapsed = time.monotonic() - start
-            return model, ok, response, elapsed, tokens_used
+            return model, endpoint_id, ok, response, elapsed, tokens_used
 
-        tasks = [
-            asyncio.create_task(check_one(model)) for model in self.models
-        ]
+        tasks = [asyncio.create_task(check_one(model, ep_id)) for model, ep_id in self.models_with_endpoints]
         total = len(tasks)
         for index, task in enumerate(asyncio.as_completed(tasks), start=1):
-            model, ok, response, elapsed, tokens_used = await task
+            result = await task
+            if len(result) == 5:
+                # Old format
+                model, ok, response, elapsed, tokens_used = result
+                endpoint_id = 0
+            else:
+                # New format with endpoint
+                model, endpoint_id, ok, response, elapsed, tokens_used = result
             if self.status_line:
-                self.status_line.update(f"Testing {index}/{total}: {model}")
+                endpoint_name = ENDPOINTS[endpoint_id]["name"] if endpoint_id < len(ENDPOINTS) else f"Endpoint-{endpoint_id}"
+                self.status_line.update(f"Testing {index}/{total}: {model} [{endpoint_name}]")
             widget = self.model_widgets.get(model)
             if widget:
                 widget.set_status("OK" if ok else "FAIL")
@@ -497,30 +583,29 @@ class WatchdogApp(App):
                 model, ok, elapsed, tokens_used, tokens_per_s, error_msg
             )
             if ok:
-                successes.append((model, elapsed, tokens_per_s))
+                successes.append((model, endpoint_id, elapsed, tokens_per_s))
             else:
-                failures.append((model, response, elapsed, tokens_per_s))
+                failures.append((model, endpoint_id, response, elapsed, tokens_per_s))
 
-        successes.sort(key=lambda item: tokens_sort_key(item[2]), reverse=True)
-        failures.sort(key=lambda item: tokens_sort_key(item[3]), reverse=True)
+        successes.sort(key=lambda item: tokens_sort_key(item[3]), reverse=True)
+        failures.sort(key=lambda item: tokens_sort_key(item[4]), reverse=True)
 
         report_lines = [f"Successes ({len(successes)}):"]
         if successes:
-            for model, elapsed, tokens_per_s in successes:
+            for model, endpoint_id, elapsed, tokens_per_s in successes:
+                endpoint_name = ENDPOINTS[endpoint_id]["name"] if endpoint_id < len(ENDPOINTS) else f"Endpoint-{endpoint_id}"
                 tps_str = format_tokens_per_s(tokens_per_s)
-                line = f"{model} :: {elapsed:.2f}s :: {tps_str}"
+                line = f"[{endpoint_name}] {model} :: {elapsed:.2f}s :: {tps_str}"
                 report_lines.append(line)
         else:
             report_lines.append("- none")
         report_lines.extend(["", f"Failures ({len(failures)}):"])
         if failures:
-            report_lines.extend(
-                (
-                    f"{model} :: {error} :: {elapsed:.2f}s :: "
-                    f"{format_tokens_per_s(tokens_per_s)}"
-                )
-                for model, error, elapsed, tokens_per_s in failures
-            )
+            for model, endpoint_id, error, elapsed, tokens_per_s in failures:
+                endpoint_name = ENDPOINTS[endpoint_id]["name"] if endpoint_id < len(ENDPOINTS) else f"Endpoint-{endpoint_id}"
+                tps_str = format_tokens_per_s(tokens_per_s)
+                line = f"[{endpoint_name}] {model} :: {error} :: {elapsed:.2f}s :: {tps_str}"
+                report_lines.append(line)
         else:
             report_lines.append("- none")
         report = "\n".join(report_lines)
@@ -530,37 +615,53 @@ class WatchdogApp(App):
 async def run_quiet():
     has_api_key = bool(os.getenv("API_KEY"))
     print(f"DEBUG: API_KEY set: {has_api_key}", flush=True)
-    base_url = os.getenv("OPENAI_BASE_URL", "not set")
-    print(f"DEBUG: OPENAI_BASE_URL: {base_url}", flush=True)
+    
+    # Print configured endpoints
+    if ENDPOINTS:
+        print(f"DEBUG: Configured {len(ENDPOINTS)} endpoint(s):", flush=True)
+        for ep in ENDPOINTS:
+            print(f"  - {ep['name']}: {ep['base_url']}", flush=True)
+    else:
+        print("DEBUG: No endpoints configured", flush=True)
+        return
+    
     word = "potato"
     prompt = (
         f"Give me ONLY a word. The word is {word}. Nothing else. "
         "No sentences, no explanations, no definitions. Just the word."
     )
-    models = await asyncio.to_thread(get_available_models)
-    if not models:
+    models_with_endpoints = await asyncio.to_thread(get_all_models_from_endpoints)
+    if not models_with_endpoints:
         print("No models available.")
         return
 
-    async def check_one(model: str):
+    async def check_one(model: str, endpoint_id: int):
         start = time.monotonic()
+        endpoint_name = ENDPOINTS[endpoint_id]["name"] if endpoint_id < len(ENDPOINTS) else f"Endpoint-{endpoint_id}"
         try:
             ok, response, tokens_used = await asyncio.wait_for(
-                asyncio.to_thread(check_model, model, word, prompt),
+                asyncio.to_thread(check_model, model, word, prompt, endpoint_id),
                 timeout=45.0,
             )
         except asyncio.TimeoutError:
             elapsed = time.monotonic() - start
-            return model, False, "Timeout after 45s", elapsed, None
+            return model, endpoint_name, False, "Timeout after 45s", elapsed, None
         elapsed = time.monotonic() - start
-        return model, ok, response, elapsed, tokens_used
+        return model, endpoint_name, ok, response, elapsed, tokens_used
 
-    tasks = [asyncio.create_task(check_one(model)) for model in models]
+    tasks = [asyncio.create_task(check_one(model, ep_id)) for model, ep_id in models_with_endpoints]
     successes = []
     failures = []
 
     for task in asyncio.as_completed(tasks):
-        model, ok, response, elapsed, tokens_used = await task
+        result = await task
+        if len(result) == 5:
+            # Old format (shouldn't happen now)
+            model, ok, response, elapsed, tokens_used = result
+            endpoint_name = "unknown"
+        else:
+            # New format with endpoint
+            model, endpoint_name, ok, response, elapsed, tokens_used = result
         tokens_per_s = None
         if tokens_used and elapsed and elapsed > 0:
             tokens_per_s = tokens_used / elapsed
@@ -569,9 +670,9 @@ async def run_quiet():
             model, ok, elapsed, tokens_used, tokens_per_s, error_msg
         )
         if ok:
-            successes.append((model, elapsed, tokens_per_s))
+            successes.append((model, endpoint_name, elapsed, tokens_per_s))
         else:
-            failures.append((model, response, elapsed, tokens_per_s))
+            failures.append((model, endpoint_name, response, elapsed, tokens_per_s))
 
     successes.sort(key=lambda x: x[2] if x[2] else -1, reverse=True)
     failures.sort(key=lambda x: x[3] if x[3] else -1, reverse=True)
@@ -581,16 +682,16 @@ async def run_quiet():
 
     print(f"Successes ({len(successes)}):")
     if successes:
-        for model, elapsed, tokens_per_s in successes:
-            print(f"  {model} :: {elapsed:.2f}s :: {fmt_tps(tokens_per_s)}")
+        for model, endpoint_name, elapsed, tokens_per_s in successes:
+            print(f"  [{endpoint_name}] {model} :: {elapsed:.2f}s :: {fmt_tps(tokens_per_s)}")
     else:
         print("  - none")
 
     print(f"\nFailures ({len(failures)}):")
     if failures:
-        for model, error, elapsed, tokens_per_s in failures:
+        for model, endpoint_name, error, elapsed, tokens_per_s in failures:
             tps_str = fmt_tps(tokens_per_s)
-            print(f"  {model} :: {error} :: {elapsed:.2f}s :: {tps_str}")
+            print(f"  [{endpoint_name}] {model} :: {error} :: {elapsed:.2f}s :: {tps_str}")
     else:
         print("  - none")
 

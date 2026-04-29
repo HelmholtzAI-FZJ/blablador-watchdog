@@ -233,18 +233,31 @@ cmd_summary() {
         throttled_count=0
     fi
     echo -e "Throttled users: ${RED}$throttled_count${NC}"
-    
-    # Blacklisted count
-    local blacklisted=$($REDIS_CLI HGETALL "access_control:users" 2>/dev/null | grep "blacklisted" | wc -l | tr -d ' ')
-    if [ -z "$blacklisted" ]; then
-        blacklisted=0
-    fi
-    echo -e "Blacklisted users: ${RED}$blacklisted${NC}"
 
-    # Show banned users list if any
-    if [ "$blacklisted" -gt 0 ]; then
+    # Show throttled users with emails if any
+    if [ "$throttled_count" -gt 0 ]; then
         echo ""
-        echo -e "${YELLOW}Banned users:${NC}"
+        echo -e "${YELLOW}Throttled users:${NC}"
+        get_throttled_users 9999 | while IFS='|' read -r user model remaining email; do
+            if [ -z "$email" ] || [ "$email" = "(nil)" ]; then
+                email=$(get_user_email "$user")
+            fi
+            [ -z "$email" ] || [ "$email" = "(nil)" ] && email="unknown ($user)"
+            echo "  - $email ($model, ${remaining}s remaining)"
+        done
+    fi
+
+    # Blacklisted + punished count
+    local blacklisted_punished=$($REDIS_CLI HGETALL "access_control:users" 2>/dev/null | grep -E "blacklisted|punished" | wc -l | tr -d ' ')
+    if [ -z "$blacklisted_punished" ]; then
+        blacklisted_punished=0
+    fi
+    echo -e "Banned/Punished users: ${RED}$blacklisted_punished${NC}"
+
+    # Show banned/punished users if any
+    if [ "$blacklisted_punished" -gt 0 ]; then
+        echo ""
+        echo -e "${YELLOW}Banned/Punished users:${NC}"
         $REDIS_CLI HGETALL "access_control:users" 2>/dev/null | paste - - | while read -r email status; do
             if [ "$status" = "blacklisted" ] || [ "$status" = "punished" ]; then
                 echo "  - $email ($status)"
@@ -473,6 +486,8 @@ cmd_all() {
     cmd_active_users "$limit"
     echo ""
     cmd_throttled "$limit"
+    echo ""
+    cmd_banned_users "$limit"
     echo ""
     # cmd_models
 }

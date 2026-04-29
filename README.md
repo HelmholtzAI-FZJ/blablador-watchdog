@@ -22,10 +22,30 @@ uv sync --extra dev
 
 ## Configuration
 Create a `.env` file with the following content:
+
+### Single Endpoint (legacy, still supported):
 ```
-API_KEY=your blablador key
+API_KEY=*** blablador key
 OPENAI_BASE_URL=https://api.helmholtz-blablador.fz-juelich.de/v1
 ```
+
+### Multiple Endpoints (recommended):
+Test multiple endpoints simultaneously by providing a comma-separated list:
+```
+API_KEY=*** blablador key
+
+# List all endpoints you want to test (comma-separated)
+OPENAI_BASE_URLS=https://test.helmholtz-blablador.fz-juelich.de/v1,https://api.helmholtz-blablador.fz-juelich.de/v1,http://localhost:8080/v1
+
+# Optional: Different API keys per endpoint (comma-separated, same order as URLs)
+# API_KEYS=key1,key2,key3
+
+# Optional: Separate embedding endpoints (if different from chat endpoints)
+# OPENAI_EMBEDDINGS_BASE_URLS=
+# EMBEDDINGS_API_KEYS=
+```
+
+The watchdog will test all models from all configured endpoints and report results with endpoint labels.
 
 
 ## TODO
