@@ -173,9 +173,53 @@ get_user_model_usage() {
     done | head -n "$limit" | sort -u
 }
 
-# Get throttled users
+# Get rate limit threshold for a user/model combo
+get_rate_limit() {
+    local user="$1"
+    local model="$2"
+    
+    # Try to get user priority from cache
+    local priority=$($REDIS_CLI GET "user:priority:$user" 2>/dev/null)
+    if [ "$priority" = "(nil)" ] || [ -z "$priority" ]; then
+        # Fall back to access_control:users
+        local email=$($REDIS_CLI GET "cache:auth:$user" 2>/dev/null)
+        if [ -n "$email" ] && [ "$email" != "(nil)" ]; then
+            priority=$($REDIS_CLI HGET "access_control:users" "$email" 2>/dev/null)
+        fi
+        if [ "$priority" = "(nil)" ] || [ -z "$priority" ]; then
+            priority="external"
+        fi
+    fi
+    
+    # Superusers have no limit
+    if [ "$priority" = "superuser" ]; then
+        echo "-1"
+        return
+    fi
+    
+    # Get the rate limit for this model/priority
+    local limit=$($REDIS_CLI GET "rate_limits:$model:$priority" 2>/dev/null)
+    if [ -n "$limit" ] && [ "$limit" != "(nil)" ]; then
+        echo "$limit"
+    else
+        # Try default priority
+        limit=$($REDIS_CLI GET "rate_limits:$model:external" 2>/dev/null)
+        if [ -n "$limit" ] && [ "$limit" != "(nil)" ]; then
+            echo "$limit"
+        else
+            echo "0"
+        fi
+    fi
+}
+
+# Get throttled users — ALL users actually being throttled:
+#   1. Users with active throttle:* keys (punished/blocked)
+#   2. Users at or above their rate limit who are being blocked
 get_throttled_users() {
     local limit="${1:-50}"
+    local seen_users=""
+    
+    # Phase 1: Users with active throttle keys (explicitly blocked/punished)
     $REDIS_CLI KEYS "throttle:*" 2>/dev/null | while read -r key; do
         local expiry=$($REDIS_CLI GET "$key" 2>/dev/null)
         if [ -n "$expiry" ] && [ "$expiry" != "(nil)" ]; then
@@ -183,14 +227,42 @@ get_throttled_users() {
             if [ $remaining -gt 0 ]; then
                 local user=$(echo "$key" | sed 's/throttle://g' | cut -d':' -f1)
                 local email=$($REDIS_CLI GET "cache:auth:$user" 2>/dev/null)
-                if [ -z "$email" ] || [ "$email" = "(nil)" ]; then
-                    email=""
-                fi
+                [ -z "$email" ] || [ "$email" = "(nil)" ] && email=""
                 local model=$(echo "$key" | rev | cut -d':' -f1 | rev)
-                echo "$user|$model|$remaining|$email"
+                echo "$user|$model|$remaining|$email|throttle_key"
             fi
         fi
-    done | head -n "$limit"
+    done
+    
+    # Phase 2: Users whose current rate count >= their limit
+    # This catches users hitting rate limits even without a throttle:* key
+    $REDIS_CLI KEYS "rate:*" 2>/dev/null | while read -r key; do
+        local raw=${key#rate:}
+        # Extract user and model from rate:user:model:...key or rate:user:model
+        local user=$(echo "$raw" | cut -d':' -f1)
+        # Model is everything except the last field
+        local model=$(echo "$raw" | rev | cut -d':' -f2- | rev)
+        local current=$($REDIS_CLI GET "$key" 2>/dev/null)
+        
+        # Skip if not a number
+        [[ "$current" =~ ^[0-9]+$ ]] || continue
+        
+        local limit=$(get_rate_limit "$user" "$model")
+        # limit=-1 means unlimited (superuser)
+        [ "$limit" = "-1" ] && continue
+        
+        # Check if user is at or above limit
+        if [ -n "$current" ] && [ "$current" != "(nil)" ] && [ "$current" -ge "$limit" ] && [ "$limit" -gt 0 ]; then
+            # Deduplicate by user (show once even if multiple models)
+            echo "$user|$model|$current|$limit|rate_limited"
+        fi
+    done | sort -u -t'|' -k1,1 | head -n "$limit" | while IFS='|' read -r user model current limit reason; do
+        local email=$($REDIS_CLI GET "cache:auth:$user" 2>/dev/null)
+        [ -z "$email" ] || [ "$email" = "(nil)" ] && email=""
+        # For rate-limited users without throttle keys, we don't know exact expiry
+        # so we show "rate_limit" as the remaining info
+        echo "$user|$model|$current|$email|$reason"
+    done
 }
 
 # Get active models
@@ -233,19 +305,8 @@ cmd_summary() {
         throttled_count=0
     fi
     echo -e "Throttled users: ${RED}$throttled_count${NC}"
-
-    # Show throttled users with emails if any
-    if [ "$throttled_count" -gt 0 ]; then
-        echo ""
-        echo -e "${YELLOW}Throttled users:${NC}"
-        get_throttled_users 9999 | while IFS='|' read -r user model remaining email; do
-            if [ -z "$email" ] || [ "$email" = "(nil)" ]; then
-                email=$(get_user_email "$user")
-            fi
-            [ -z "$email" ] || [ "$email" = "(nil)" ] && email="unknown ($user)"
-            echo "  - $email ($model, ${remaining}s remaining)"
-        done
-    fi
+    echo "  (run: ./monitor-cluster.sh throttled  for full detail)"
+    echo ""
 
     # Blacklisted + punished count
     local blacklisted_punished=$($REDIS_CLI HGETALL "access_control:users" 2>/dev/null | grep -E "blacklisted|punished" | wc -l | tr -d ' ')
@@ -382,7 +443,9 @@ cmd_rate_limits() {
 cmd_throttled() {
     local limit="${1:-50}"
     
-    print_header "Throttled Users"
+    print_header "Actually Throttled Users"
+    echo "Includes: (1) punished users with active throttle keys, (2) users at their rate limit"
+    echo ""
     
     local throttled=$(get_throttled_users "$limit")
     
@@ -393,13 +456,13 @@ cmd_throttled() {
     
     local email_width=50
     local status_width=12
-    local count_width=18
-    local model_width=60
+    local count_width=20
+    local model_width=40
     
-    printf "${BLUE}%-*s${NC} | %-*s | %-*s | %-*s${NC}\n" "$email_width" "Email" "$status_width" "Status" "$count_width" "Throttle Expires" "$model_width" "Model"
-    printf "%$((email_width + status_width + count_width + model_width + 9))s\n" | tr ' ' '-'
+    printf "${BLUE}%-*s${NC} | %-*s | %-*s | %-*s | %s${NC}\n" "$email_width" "Email" "$status_width" "Status" "$count_width" "Remaining" "$model_width" "Model" "Reason"
+    printf "%$((email_width + status_width + count_width + model_width + 12))s\n" | tr ' ' '-'
     
-    echo "$throttled" | while IFS='|' read -r user model remaining email; do
+    echo "$throttled" | while IFS='|' read -r user model remaining email reason; do
         if [ -z "$email" ]; then
             email=$(get_user_email "$user")
         fi
@@ -409,8 +472,36 @@ cmd_throttled() {
             local email_display=$(printf "%-${email_width}s" "$email")
             local status_formatted=$(format_status "$status")
             local status_padded=$(printf "%-${status_width}s" "$(echo "$status_formatted" | sed 's/\x1b\[[0-9;]*m//g')")
-            local expires_display=$(printf "%-${count_width}s" "${remaining}s")
-            printf "${BLUE}%-${email_width}s${NC} | %s | %s | %s\n" "$email_display" "$status_padded" "$expires_display" "$(printf "%-${model_width}s" "$model")"
+            
+            # Format the remaining/info column based on reason
+            if [ "$reason" = "throttle_key" ]; then
+                local remaining_display=$(printf "%-${count_width}s" "${remaining}s remaining")
+            else
+                # Rate limited: remaining field actually has current count, limit is in field 4
+                local limit_val=$(echo "$throttled" | grep "^$user|" | head -1 | cut -d'|' -f4)
+                local remaining_display=$(printf "%-${count_width}s" "count=$remaining / limit=$limit_val")
+            fi
+            
+            # Reason display
+            case "$reason" in
+                throttle_key)
+                    local reason_display="${RED}blocked/punished${NC}"
+                    ;;
+                rate_limited)
+                    local reason_display="${YELLOW}rate limit hit${NC}"
+                    ;;
+                *)
+                    local reason_display="$reason"
+                    ;;
+            esac
+            
+            printf "${BLUE}%-${email_width}s${NC} | %s | %s | %s | %s\n" \
+                "$email_display" \
+                "$status_padded" \
+                "$remaining_display" \
+                "$(printf "%-${model_width}s" "$model")" \
+                "$reason_display"
+            
             if [ -n "$violations" ] && [ "$violations" != "(nil)" ]; then
                 echo -e "  ${YELLOW}Throttle violations:${NC} $violations"
             fi

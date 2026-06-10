@@ -248,11 +248,22 @@ def get_llm_response(prompt, model, endpoint_id: int = 0):
         client, _ = get_endpoint_clients(endpoint_id)
         
         def is_qwen3_model(m):
+            """Check if model is Qwen3 family that supports enable_thinking parameter."""
             return (
                 "qwen3" in m.lower()
-                or "alias-code" in m.lower()
-                or "alias-large" in m.lower()
+                or "alias-code" in m.lower()  # Qwen3-Coder
+                or "alias-large" in m.lower()  # Qwen3-based
+                or "alias-huge" in m.lower()  # Qwen3.5-122B
+                or "alias-mis" in m.lower()   # Qwen3-based
             )
+            
+        def supports_thinking_toggle(m):
+            """Check if model supports the enable_thinking parameter.
+            
+            Only Qwen3 family models support this. Other models (MiniMax, etc.)
+            will return None content if this parameter is sent.
+            """
+            return is_qwen3_model(m)
 
         def request_completion(max_tokens):
             kwargs = {
@@ -267,7 +278,7 @@ def get_llm_response(prompt, model, endpoint_id: int = 0):
                 "presence_penalty": 1.5,
                 "frequency_penalty": 0,
             }
-            if is_qwen3_model(model):
+            if supports_thinking_toggle(model):
                 kwargs["extra_body"] = {
                     "top_k": 20,
                     "chat_template_kwargs": {"enable_thinking": False},
@@ -288,13 +299,21 @@ def get_llm_response(prompt, model, endpoint_id: int = 0):
                 )
             finish_reason = getattr(response.choices[0], "finish_reason", None)
             if reasoning and finish_reason == "length":
-                response = request_completion(256)
+                # Thinking models: try with more tokens to get actual content
+                response = request_completion(512)
                 has_choices = response and hasattr(response, "choices")
                 if has_choices and response.choices:
                     message = getattr(response.choices[0], "message", None)
                     content = getattr(message, "content", None)
                     if message and isinstance(content, str):
                         return content.strip(), extract_usage_tokens(response)
+                    # If still no content but has reasoning, accept reasoning as valid response
+                    reasoning_retry = getattr(message, "reasoning_content", None) or getattr(message, "reasoning", None)
+                    if reasoning_retry:
+                        return reasoning_retry[:500], extract_usage_tokens(response)
+            # Some models (like alias-mis) only output to reasoning field
+            if reasoning:
+                return reasoning[:500], extract_usage_tokens(response)
             return "An error occurred: Empty response content from LLM", None
         else:
             return "An error occurred: Invalid response from LLM", None

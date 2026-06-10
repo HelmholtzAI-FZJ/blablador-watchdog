@@ -6,7 +6,7 @@ A comprehensive monitoring script for tracking cluster usage, active users, rate
 
 - **Active users tracking** - List all users currently making requests
 - **Rate limit monitoring** - Show current rate limit usage per user and model
-- **Throttling detection** - Identify users who are currently throttled
+- **Throttling detection** - Identify users who are currently throttled, including both punished users with active throttle keys AND users hitting their rate limit
 - **Model usage analytics** - Track which models are being used most
 - **User status classification** - Superuser, elevated, internal, external, punished, blacklisted
 - **Automatic port-forwarding** - Automatically starts `kubectl port-forward` if needed
