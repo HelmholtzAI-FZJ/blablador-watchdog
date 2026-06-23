@@ -8,7 +8,7 @@ dependencies = [
     "python-dotenv>=1.2.2",
     "textual",
     "aiosqlite",
-    "pytest==9.0.3",
+    "pytest==9.1.1",
     "pygments==2.20.0",
 ]
 
