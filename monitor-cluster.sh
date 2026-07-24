@@ -620,7 +620,7 @@ done
 # Auto-start port-forward if not running
 start_port_forward() {
     echo "Starting port-forward for Redis..."
-    kubectl port-forward svc/redis-service 6379:6379 -n app-ns > /tmp/pf-redis.log 2>&1 &
+    kubectl --context blablador-import port-forward svc/redis-service 6379:6379 -n app-ns > /tmp/pf-redis.log 2>&1 &
     PF_PID=$!
     echo "Port-forward started with PID $PF_PID"
     
@@ -655,7 +655,7 @@ if ! $REDIS_CLI ping 2>/dev/null | grep -q PONG; then
                 echo ""
                 echo "Diagnostics:"
                 echo "  - Testing Redis pod directly:"
-                kubectl exec -n app-ns -i $(kubectl get pod -n app-ns -l app=redis -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) -- redis-cli ping 2>/dev/null
+                kubectl --context blablador-import exec -n app-ns -i $(kubectl --context blablador-import get pod -n app-ns -l app=redis -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) -- redis-cli ping 2>/dev/null
                 echo ""
                 exit 1
             fi
@@ -678,7 +678,7 @@ if ! $REDIS_CLI ping 2>/dev/null | grep -q PONG; then
                     echo ""
                     echo "Diagnostics:"
                     echo "  - Testing Redis pod directly:"
-                    kubectl exec -n app-ns -i $(kubectl get pod -n app-ns -l app=redis -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) -- redis-cli ping 2>/dev/null
+                    kubectl --context blablador-import exec -n app-ns -i $(kubectl --context blablador-import get pod -n app-ns -l app=redis -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) -- redis-cli ping 2>/dev/null
                     echo ""
                     exit 1
                 fi
@@ -690,7 +690,7 @@ if ! $REDIS_CLI ping 2>/dev/null | grep -q PONG; then
             echo ""
             echo "Diagnostics:"
             echo "  - Testing Redis pod directly:"
-            kubectl exec -n app-ns -i $(kubectl get pod -n app-ns -l app=redis -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) -- redis-cli ping 2>/dev/null
+            kubectl --context blablador-import exec -n app-ns -i $(kubectl --context blablador-import get pod -n app-ns -l app=redis -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) -- redis-cli ping 2>/dev/null
             echo ""
             echo "Hint: Use --force-port-forward to restart the port-forward"
             exit 1

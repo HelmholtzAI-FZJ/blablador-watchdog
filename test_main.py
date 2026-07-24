@@ -49,18 +49,30 @@ class ModelsResponse:
 
 
 class ChatResponse:
-    def __init__(self):
-        self.choices = [MockChoice()]
+    def __iter__(self):
+        yield ChatChunk(content="Pot")
+        yield ChatChunk(content="ato", finish_reason="stop")
+        yield ChatChunk(total_tokens=12)
+
+
+class ChatChunk:
+    def __init__(self, content=None, reasoning=None, finish_reason=None, total_tokens=None):
+        self.choices = (
+            [MockChoice(content, reasoning, finish_reason)]
+            if content is not None or reasoning is not None or finish_reason is not None
+            else []
+        )
+        self.usage = MagicMock(total_tokens=total_tokens) if total_tokens is not None else None
 
 
 class MockChoice:
-    def __init__(self):
-        self.message = MockMessage()
-
-
-class MockMessage:
-    def __init__(self):
-        self.content = "Potato"
+    def __init__(self, content=None, reasoning=None, finish_reason=None):
+        self.delta = MagicMock(
+            content=content,
+            reasoning_content=reasoning,
+            reasoning=None,
+        )
+        self.finish_reason = finish_reason
 
 
 class EmbeddingResponse:
@@ -98,8 +110,20 @@ def test_get_available_models():
 def test_get_llm_response():
     prompt = "Give me ONLY a word. The word is potato. Nothing else."
     model = "alias-fast"
-    response, _ = get_llm_response(prompt, model)
+    response, tokens = get_llm_response(prompt, model)
     assert "Potato" in response
+    assert tokens == 12
+
+
+@patch("main.client", mock_client)
+def test_get_llm_response_requests_streaming():
+    with patch.object(
+        mock_client.chat.completions, "create", wraps=mock_client.chat.completions.create
+    ) as create:
+        get_llm_response("test", "alias-fast")
+
+    assert create.call_args.kwargs["stream"] is True
+    assert create.call_args.kwargs["stream_options"] == {"include_usage": True}
 
 
 # Mocking OpenAI client for tests

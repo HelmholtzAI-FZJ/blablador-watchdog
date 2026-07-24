@@ -178,9 +178,40 @@ def get_endpoints() -> List[Dict]:
 
 # Global endpoint registry
 ENDPOINTS = get_endpoints()
+client = ENDPOINTS[0]["client"] if ENDPOINTS else None
+embedding_client = ENDPOINTS[0]["embedding_client"] if ENDPOINTS else None
+_registry_client = client
+_registry_embedding_client = embedding_client
+
+
+def get_available_models() -> List[str]:
+    """Compatibility wrapper for the original single-endpoint API."""
+    if client is not None and client is not _registry_client:
+        models = client.models.list()
+        return [model.id for model in models.data]
+    if ENDPOINTS:
+        return [model for model, _endpoint_id in get_all_models_from_endpoints()]
+    if client is None:
+        return []
+    models = client.models.list()
+    return [model.id for model in models.data]
+
 
 def get_endpoint_clients(endpoint_id: int = 0):
     """Get client and embedding_client for a specific endpoint."""
+    patched_client = client is not None and client is not _registry_client
+    patched_embedding = (
+        embedding_client is not None
+        and embedding_client is not _registry_embedding_client
+    )
+    if endpoint_id == 0 and (patched_client or patched_embedding):
+        active_client = client if patched_client else _registry_client
+        active_embedding_client = (
+            embedding_client if patched_embedding else _registry_embedding_client
+        )
+        return active_client, active_embedding_client or active_client
+    if not ENDPOINTS and endpoint_id == 0 and client is not None:
+        return client, embedding_client or client
     if endpoint_id >= len(ENDPOINTS):
         raise ValueError(f"Endpoint {endpoint_id} not found")
     ep = ENDPOINTS[endpoint_id]
@@ -241,6 +272,65 @@ def extract_usage_tokens(response):
     return None
 
 
+def consume_completion_stream(stream):
+    # Keep compatibility with OpenAI-compatible gateways that ignore stream=True
+    # and return a regular completion object.
+    choices = getattr(stream, "choices", None)
+    if choices:
+        choice = choices[0]
+        message = getattr(choice, "message", None)
+        if message is not None:
+            content = getattr(message, "content", None)
+            reasoning = (
+                getattr(message, "reasoning_content", None)
+                or getattr(message, "reasoning", None)
+            )
+            return (
+                content.strip() if isinstance(content, str) else "",
+                reasoning.strip() if isinstance(reasoning, str) else "",
+                getattr(choice, "finish_reason", None),
+                extract_usage_tokens(stream),
+            )
+
+    content_parts = []
+    reasoning_parts = []
+    finish_reason = None
+    tokens_used = None
+
+    for chunk in stream:
+        chunk_tokens = extract_usage_tokens(chunk)
+        if chunk_tokens is not None:
+            tokens_used = chunk_tokens
+
+        choices = getattr(chunk, "choices", None)
+        if not choices:
+            continue
+
+        choice = choices[0]
+        finish_reason = getattr(choice, "finish_reason", None) or finish_reason
+        delta = getattr(choice, "delta", None)
+        if not delta:
+            continue
+
+        content = getattr(delta, "content", None)
+        if isinstance(content, str):
+            content_parts.append(content)
+
+        reasoning = (
+            getattr(delta, "reasoning_content", None)
+            or getattr(delta, "reasoning", None)
+        )
+        if isinstance(reasoning, str):
+            reasoning_parts.append(reasoning)
+
+    return (
+        "".join(content_parts).strip(),
+        "".join(reasoning_parts).strip(),
+        finish_reason,
+        tokens_used,
+    )
+
+
 @retry_with_exponential_backoff
 def get_llm_response(prompt, model, endpoint_id: int = 0):
     response = None
@@ -274,7 +364,8 @@ def get_llm_response(prompt, model, endpoint_id: int = 0):
                 "n": 1,
                 "max_tokens": max_tokens,
                 "stop": None,
-                "stream": False,
+                "stream": True,
+                "stream_options": {"include_usage": True},
                 "presence_penalty": 1.5,
                 "frequency_penalty": 0,
             }
@@ -286,37 +377,21 @@ def get_llm_response(prompt, model, endpoint_id: int = 0):
             return client.chat.completions.create(**kwargs)
 
         response = request_completion(30)
-        if response and hasattr(response, 'choices') and response.choices:
-            message = getattr(response.choices[0], "message", None)
-            content = getattr(message, "content", None) if message else None
-            if isinstance(content, str):
-                return content.strip(), extract_usage_tokens(response)
-            reasoning = None
-            if message:
-                reasoning = (
-                    getattr(message, "reasoning_content", None)
-                    or getattr(message, "reasoning", None)
-                )
-            finish_reason = getattr(response.choices[0], "finish_reason", None)
-            if reasoning and finish_reason == "length":
-                # Thinking models: try with more tokens to get actual content
-                response = request_completion(512)
-                has_choices = response and hasattr(response, "choices")
-                if has_choices and response.choices:
-                    message = getattr(response.choices[0], "message", None)
-                    content = getattr(message, "content", None)
-                    if message and isinstance(content, str):
-                        return content.strip(), extract_usage_tokens(response)
-                    # If still no content but has reasoning, accept reasoning as valid response
-                    reasoning_retry = getattr(message, "reasoning_content", None) or getattr(message, "reasoning", None)
-                    if reasoning_retry:
-                        return reasoning_retry[:500], extract_usage_tokens(response)
-            # Some models (like alias-mis) only output to reasoning field
-            if reasoning:
-                return reasoning[:500], extract_usage_tokens(response)
-            return "An error occurred: Empty response content from LLM", None
-        else:
-            return "An error occurred: Invalid response from LLM", None
+        content, reasoning, finish_reason, tokens_used = consume_completion_stream(response)
+        if content:
+            return content, tokens_used
+        if reasoning and finish_reason == "length":
+            # Thinking models: try with more tokens to get actual content.
+            response = request_completion(512)
+            content, reasoning_retry, _, tokens_used = consume_completion_stream(response)
+            if content:
+                return content, tokens_used
+            if reasoning_retry:
+                return reasoning_retry[:500], tokens_used
+        # Some models (like alias-mis) only output to the reasoning field.
+        if reasoning:
+            return reasoning[:500], tokens_used
+        return "An error occurred: Empty response content from LLM", None
     except UnboundLocalError:
         return "", None
     except Exception as e:

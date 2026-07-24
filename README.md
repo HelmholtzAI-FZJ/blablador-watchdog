@@ -86,3 +86,25 @@ See the [full documentation](docs/monitor-cluster.md) for more details.
 # View active users
 ./monitor-cluster.sh active-users --limit 10
 ```
+
+## Supercomputer vLLM Job Monitoring
+
+`vllm_jobs.py` connects in parallel to `jureca`, `booster`, `jupiter`, and `haicluster1` over SSH, inspects your SLURM vLLM jobs, prints one line per model, and records snapshots in the metrics database. Running jobs are counted as concurrency, pending/configuring jobs are shown as launching, recent failed jobs are shown as dead, and old pending or suspicious running jobs are marked clearly as `STUCK`.
+
+The checker also reuses the same watchdog model probe from `main.py` for supercomputer-backed models whose latest API watchdog result is failing. If SLURM says the vLLM job is running but the model still does not respond, the status is escalated to `STUCK`.
+
+```bash
+python3 vllm_jobs.py
+python3 vllm_jobs.py --clusters jureca,booster,jupiter,haicluster1
+```
+
+Useful environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VLLM_SSH_TIMEOUT` | `45` | Per-cluster SSH timeout in seconds |
+| `VLLM_PENDING_STUCK_MINUTES` | `30` | Pending/configuring age after which a model is marked `STUCK` |
+| `VLLM_RUNNING_LAUNCH_MINUTES` | `10` | Running age after which an unidentified vLLM job is suspicious |
+| `VLLM_PROBE_TIMEOUT` | `45` | Timeout for the reused API watchdog probe |
+
+`plot_metrics.py` now also writes `supercomputer_model_status.png`, showing per-model availability and running-job concurrency on the supercomputers.
