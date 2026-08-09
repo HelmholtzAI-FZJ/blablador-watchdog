@@ -5,6 +5,7 @@ description = "Monitor blablador model availability"
 requires-python = ">=3.10"
 dependencies = [
     "openai",
+    "httpx",
     "python-dotenv>=1.2.2",
     "textual",
     "aiosqlite",

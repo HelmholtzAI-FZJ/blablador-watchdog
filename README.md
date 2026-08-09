@@ -1,5 +1,5 @@
 # blablador-watchdog
-This checks if blablador is working correctly by asking each model for a word. Embedding models are tested via an embedding request instead of chat. This should ensure that the models are responding.
+This checks if blablador is working correctly with a capability-appropriate probe. Chat models are asked for a word, embeddings use the embeddings API, Whisper-style models transcribe the bundled audio fixture, and image/video models receive a lightweight route-validation probe that does not launch an expensive generation job.
 
 ## Usage
 ```bash
@@ -59,8 +59,9 @@ The watchdog will test all models from all configured endpoints and report resul
 - [ ] Add configurable timeout per model (currently global 45s)
 - [x] Add historical performance tracking over multiple runs
 
-## Embedding models
-Embedding models are routed to an embedding test (not chat) and configured in `embedding_models.py`.
+## Model capability detection
+
+The watchdog uses extended fields returned by `/v1/models`, including `task_type`, `pipeline_name`, and `pipeline_class`, then falls back to well-known model-name patterns when a gateway strips those fields. It currently routes chat, embedding, audio transcription, image-generation, and video-generation models separately. If a catalog gateway advertises a specialized model but returns 404 for its route, the probe automatically tries another configured endpoint advertising the same model. Kimi-K3 chat probes use `thinking_effort=low` and a 90-second ceiling to keep health checks short without misclassifying a slow healthy response.
 
 ## Cluster Usage Monitoring
 

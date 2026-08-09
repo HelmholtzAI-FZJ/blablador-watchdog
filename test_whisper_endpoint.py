@@ -14,7 +14,7 @@ import httpx
 
 BASE_URL = "https://ptj.blablador.fz-juelich.de/v1"
 
-def test_models():
+def run_models_check():
     """Test the /v1/models endpoint"""
     print(f"GET {BASE_URL}/models")
     with httpx.Client(timeout=30) as client:
@@ -30,7 +30,7 @@ def test_models():
             print(f"Error: {resp.text}")
             return False
 
-def test_transcription(audio_file: str):
+def run_transcription_check(audio_file: str):
     """Test the /v1/audio/transcriptions endpoint"""
     print(f"\nPOST {BASE_URL}/audio/transcriptions (file={audio_file})")
     
@@ -42,7 +42,7 @@ def test_transcription(audio_file: str):
         "curl", "-s", "-X", "POST",
         "-H", f"Authorization: Bearer {API_KEY}",
         "-F", f"file=@{audio_file}",
-        "-F", "model=whisper-1",
+        "-F", "model=faster-whisper-large-v3",
         "-F", "language=en",
         f"{BASE_URL}/audio/transcriptions"
     ]
@@ -72,12 +72,12 @@ if __name__ == "__main__":
     print("=" * 60)
     
     # Test 1: List models
-    models_ok = test_models()
+    models_ok = run_models_check()
     
     # Test 2: Transcription - use sample.wav if it exists
     audio_file = "sample.wav"
     if os.path.exists(audio_file):
-        transcription_ok = test_transcription(audio_file)
+        transcription_ok = run_transcription_check(audio_file)
     else:
         print(f"\nNo audio file found at {audio_file}, skipping transcription test")
         transcription_ok = None

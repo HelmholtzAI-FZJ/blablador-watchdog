@@ -2,8 +2,10 @@ import asyncio
 import os
 import time
 import random
+from pathlib import Path
 from typing import Optional, Tuple, List, Dict
 
+import httpx
 from openai import OpenAI
 from dotenv import load_dotenv
 from textual.app import App, ComposeResult
@@ -20,6 +22,15 @@ MAX_RETRIES = 3
 INITIAL_DELAY = 1.0  # seconds
 MAX_DELAY = 10.0  # seconds
 BACKOFF_FACTOR = 2.0
+DEFAULT_MODEL_TIMEOUT = 70.0
+SLOW_REASONING_MODEL_TIMEOUT = 200.0
+
+
+def model_timeout(model: str) -> float:
+    normalized = model.lower()
+    if "kimi-k3" in normalized or "kimi_k3" in normalized:
+        return SLOW_REASONING_MODEL_TIMEOUT
+    return DEFAULT_MODEL_TIMEOUT
 
 
 def is_retriable_error(error: Exception) -> Tuple[bool, Optional[float]]:
@@ -172,6 +183,7 @@ def get_endpoints() -> List[Dict]:
             "client": OpenAI(api_key=api_key, base_url=base_url),
             "embedding_client": OpenAI(api_key=emb_api_key, base_url=emb_base_url),
             "models": [],
+            "model_metadata": {},
         })
     
     return endpoints
@@ -219,9 +231,45 @@ def get_endpoint_clients(endpoint_id: int = 0):
 
 
 def is_embedding_model(model):
-    if "embedding" in model:
+    if "embedding" in model.lower():
         return True
     return model in EMBEDDING_MODELS
+
+
+def model_metadata(model: str, endpoint_id: int = 0) -> Dict:
+    if endpoint_id >= len(ENDPOINTS):
+        return {}
+    return ENDPOINTS[endpoint_id].get("model_metadata", {}).get(model, {})
+
+
+def detect_model_type(model: str, endpoint_id: int = 0) -> str:
+    """Return the API capability to probe for a discovered model."""
+    metadata = model_metadata(model, endpoint_id)
+    model_lower = model.lower()
+    task_type = str(metadata.get("task_type") or "").lower()
+    pipeline = " ".join(
+        str(metadata.get(key) or "").lower()
+        for key in ("pipeline_name", "pipeline_class")
+    )
+
+    if is_embedding_model(model):
+        return "embedding"
+    if (
+        "whisper" in model_lower
+        or "transcription" in task_type
+        or "speech-to-text" in task_type
+        or "automatic-speech-recognition" in task_type
+    ):
+        return "audio"
+    if (
+        any(marker in task_type for marker in ("ti2v", "t2v", "video"))
+        or "video" in pipeline
+        or "minimax-h3" in model_lower
+    ):
+        return "video"
+    if "image" in task_type or "image" in pipeline:
+        return "image"
+    return "chat"
 
 
 def get_all_models_from_endpoints() -> List[Tuple[str, int]]:
@@ -241,10 +289,17 @@ def get_all_models_from_endpoints() -> List[Tuple[str, int]]:
             print(f"DEBUG: Fetching models from {ep['name']} ({base_url})...", flush=True)
             models = client.models.list()
             model_list = [model.id for model in models.data]
+            metadata = {}
+            for model in models.data:
+                if hasattr(model, "model_dump"):
+                    metadata[model.id] = model.model_dump()
+                else:
+                    metadata[model.id] = dict(vars(model))
             msg = f"DEBUG: {ep['name']}: Found {len(model_list)} models: {model_list}"
             print(msg, flush=True)
             # Store models in endpoint registry
             ep["models"] = model_list
+            ep["model_metadata"] = metadata
             # Add to all_models with endpoint ID
             for model_id in model_list:
                 all_models.append((model_id, ep["id"]))
@@ -254,6 +309,7 @@ def get_all_models_from_endpoints() -> List[Tuple[str, int]]:
             import traceback
             traceback.print_exc()
             ep["models"] = []
+            ep["model_metadata"] = {}
     
     return all_models
 
@@ -343,7 +399,6 @@ def get_llm_response(prompt, model, endpoint_id: int = 0):
                 "qwen3" in m.lower()
                 or "alias-code" in m.lower()  # Qwen3-Coder
                 or "alias-large" in m.lower()  # Qwen3-based
-                or "alias-huge" in m.lower()  # Qwen3.5-122B
                 or "alias-mis" in m.lower()   # Qwen3-based
             )
             
@@ -354,6 +409,10 @@ def get_llm_response(prompt, model, endpoint_id: int = 0):
             will return None content if this parameter is sent.
             """
             return is_qwen3_model(m)
+
+        def is_kimi_k3_model(m):
+            normalized = m.lower()
+            return "kimi-k3" in normalized or "kimi_k3" in normalized
 
         def request_completion(max_tokens):
             kwargs = {
@@ -373,6 +432,10 @@ def get_llm_response(prompt, model, endpoint_id: int = 0):
                 kwargs["extra_body"] = {
                     "top_k": 20,
                     "chat_template_kwargs": {"enable_thinking": False},
+                }
+            if is_kimi_k3_model(model):
+                kwargs["extra_body"] = {
+                    "chat_template_kwargs": {"thinking_effort": "low"},
                 }
             return client.chat.completions.create(**kwargs)
 
@@ -436,8 +499,110 @@ def get_embedding_response(text, model, endpoint_id: int = 0):
         return f"An error occurred: {str(e)}", None
 
 
+def _endpoint_request_config(endpoint_id: int) -> Tuple[str, Dict[str, str]]:
+    if endpoint_id >= len(ENDPOINTS):
+        raise ValueError(f"Endpoint {endpoint_id} not found")
+    endpoint = ENDPOINTS[endpoint_id]
+    headers = {}
+    if endpoint.get("api_key"):
+        headers["Authorization"] = f"Bearer {endpoint['api_key']}"
+    return endpoint["base_url"].rstrip("/"), headers
+
+
+def _specialized_endpoint_candidates(model: str, endpoint_id: int):
+    """Yield the requested endpoint, then alternate gateways advertising the model."""
+    yield endpoint_id
+    for candidate_id, endpoint in enumerate(ENDPOINTS):
+        if candidate_id == endpoint_id:
+            continue
+        if model in endpoint.get("models", []):
+            yield candidate_id
+
+
+@retry_with_exponential_backoff
+def get_audio_response(model: str, endpoint_id: int = 0):
+    """Exercise an OpenAI-compatible transcription endpoint."""
+    try:
+        base_url, headers = _endpoint_request_config(endpoint_id)
+        audio_path = Path(__file__).with_name("sample.wav")
+        if not audio_path.exists():
+            return f"An error occurred: Audio fixture not found: {audio_path}", None
+        with audio_path.open("rb") as audio_file:
+            response = httpx.post(
+                f"{base_url}/audio/transcriptions",
+                headers=headers,
+                files={"file": (audio_path.name, audio_file, "audio/wav")},
+                data={"model": model, "language": "en"},
+                timeout=40.0,
+            )
+        response.raise_for_status()
+        payload = response.json()
+        text = payload.get("text")
+        if isinstance(text, str):
+            return text or "transcription endpoint responded", None
+        return "An error occurred: Invalid transcription response", None
+    except Exception as error:
+        return f"An error occurred: {error}", None
+
+
+@retry_with_exponential_backoff
+def get_video_response(model: str, endpoint_id: int = 0):
+    """Probe the video route without starting an expensive generation job."""
+    try:
+        last_response = None
+        for candidate_id in _specialized_endpoint_candidates(model, endpoint_id):
+            base_url, headers = _endpoint_request_config(candidate_id)
+            response = httpx.post(
+                f"{base_url}/videos",
+                headers={**headers, "Content-Type": "application/json"},
+                json={"model": model},
+                timeout=20.0,
+            )
+            last_response = response
+            endpoint_name = ENDPOINTS[candidate_id].get("name", f"Endpoint-{candidate_id + 1}")
+            if response.is_success:
+                return f"video endpoint accepted request via {endpoint_name}", None
+            # Missing-prompt validation proves routing and the video API are
+            # alive without consuming GPUs for a watchdog artifact.
+            body = response.text.lower()
+            if response.status_code in (400, 422) and "prompt" in body:
+                return f"video endpoint healthy via {endpoint_name}", None
+            # A catalog gateway may expose the model but not its specialized
+            # route. Only that case should fall through to another endpoint.
+            if response.status_code != 404:
+                response.raise_for_status()
+        if last_response is not None:
+            last_response.raise_for_status()
+        return "An error occurred: Invalid video response", None
+    except Exception as error:
+        return f"An error occurred: {error}", None
+
+
+@retry_with_exponential_backoff
+def get_image_response(model: str, endpoint_id: int = 0):
+    """Probe the image route without starting an expensive generation job."""
+    try:
+        base_url, headers = _endpoint_request_config(endpoint_id)
+        response = httpx.post(
+            f"{base_url}/images/generations",
+            headers={**headers, "Content-Type": "application/json"},
+            json={"model": model},
+            timeout=20.0,
+        )
+        if response.is_success:
+            return "image endpoint accepted request", None
+        body = response.text.lower()
+        if response.status_code in (400, 422) and "prompt" in body:
+            return "image endpoint healthy (prompt validation passed)", None
+        response.raise_for_status()
+        return "An error occurred: Invalid image response", None
+    except Exception as error:
+        return f"An error occurred: {error}", None
+
+
 def check_model(model, word, prompt, endpoint_id: int = 0):
-    if is_embedding_model(model):
+    model_type = detect_model_type(model, endpoint_id)
+    if model_type == "embedding":
         response, tokens_used = get_embedding_response(word, model, endpoint_id)
         if response == "An error occurred: Empty embedding response":
             return False, response, tokens_used
@@ -450,6 +615,18 @@ def check_model(model, word, prompt, endpoint_id: int = 0):
         if "Internal Server Error" in response:
             return False, response, tokens_used
         return False, response, tokens_used
+
+    if model_type == "audio":
+        response, tokens_used = get_audio_response(model, endpoint_id)
+        return not response.startswith("An error occurred:"), response, tokens_used
+
+    if model_type == "video":
+        response, tokens_used = get_video_response(model, endpoint_id)
+        return not response.startswith("An error occurred:"), response, tokens_used
+
+    if model_type == "image":
+        response, tokens_used = get_image_response(model, endpoint_id)
+        return not response.startswith("An error occurred:"), response, tokens_used
 
     response, tokens_used = get_llm_response(prompt, model, endpoint_id)
     if response == "An error occurred: Empty response content from LLM":
@@ -611,7 +788,7 @@ class WatchdogApp(App):
             widget = ModelStatus(f"{model} [{endpoint_name}]")
             widget.model = model  # Store original model name
             widget.endpoint_id = endpoint_id  # Store endpoint ID
-            self.model_widgets[model] = widget
+            self.model_widgets[(model, endpoint_id)] = widget
             if self.grid:
                 self.grid.mount(widget)
 
@@ -640,14 +817,15 @@ class WatchdogApp(App):
 
         async def check_one(model: str, endpoint_id: int):
             start = time.monotonic()
+            timeout = model_timeout(model)
             try:
                 ok, response, tokens_used = await asyncio.wait_for(
                     asyncio.to_thread(check_model, model, word, prompt, endpoint_id),
-                    timeout=45.0,
+                    timeout=timeout,
                 )
             except asyncio.TimeoutError:
                 elapsed = time.monotonic() - start
-                return model, endpoint_id, False, "Timeout after 45s", elapsed, None
+                return model, endpoint_id, False, f"Timeout after {timeout:g}s", elapsed, None
             elapsed = time.monotonic() - start
             return model, endpoint_id, ok, response, elapsed, tokens_used
 
@@ -665,7 +843,7 @@ class WatchdogApp(App):
             if self.status_line:
                 endpoint_name = ENDPOINTS[endpoint_id]["name"] if endpoint_id < len(ENDPOINTS) else f"Endpoint-{endpoint_id}"
                 self.status_line.update(f"Testing {index}/{total}: {model} [{endpoint_name}]")
-            widget = self.model_widgets.get(model)
+            widget = self.model_widgets.get((model, endpoint_id))
             if widget:
                 widget.set_status("OK" if ok else "FAIL")
                 widget.set_elapsed(elapsed)
@@ -731,15 +909,16 @@ async def run_quiet():
 
     async def check_one(model: str, endpoint_id: int):
         start = time.monotonic()
+        timeout = model_timeout(model)
         endpoint_name = ENDPOINTS[endpoint_id]["name"] if endpoint_id < len(ENDPOINTS) else f"Endpoint-{endpoint_id}"
         try:
             ok, response, tokens_used = await asyncio.wait_for(
                 asyncio.to_thread(check_model, model, word, prompt, endpoint_id),
-                timeout=45.0,
+                timeout=timeout,
             )
         except asyncio.TimeoutError:
             elapsed = time.monotonic() - start
-            return model, endpoint_name, False, "Timeout after 45s", elapsed, None
+            return model, endpoint_name, False, f"Timeout after {timeout:g}s", elapsed, None
         elapsed = time.monotonic() - start
         return model, endpoint_name, ok, response, elapsed, tokens_used
 

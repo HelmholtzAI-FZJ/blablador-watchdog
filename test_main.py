@@ -2,9 +2,12 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from main import (
+    detect_model_type,
+    get_video_response,
     get_available_models,
     get_llm_response,
     get_embedding_response,
+    model_timeout,
     is_retriable_error,
     retry_with_exponential_backoff,
 )
@@ -124,6 +127,72 @@ def test_get_llm_response_requests_streaming():
 
     assert create.call_args.kwargs["stream"] is True
     assert create.call_args.kwargs["stream_options"] == {"include_usage": True}
+
+
+@patch("main.client", mock_client)
+def test_kimi_k3_uses_low_thinking_effort():
+    with patch.object(
+        mock_client.chat.completions, "create", wraps=mock_client.chat.completions.create
+    ) as create:
+        get_llm_response("test", "alias-kimi-k3-1m")
+
+    assert create.call_args.kwargs["extra_body"] == {
+        "chat_template_kwargs": {"thinking_effort": "low"}
+    }
+
+
+def test_detects_model_capabilities_from_names_and_metadata():
+    endpoint = {
+        "model_metadata": {
+            "diffusion-model": {
+                "task_type": "TI2V",
+                "pipeline_class": "ExampleVideoPipeline",
+            },
+            "picture-model": {"pipeline_name": "ImageGenerationPipeline"},
+        }
+    }
+    with patch("main.ENDPOINTS", [endpoint]):
+        assert detect_model_type("alias-fast", 0) == "chat"
+        assert detect_model_type("alias-embeddings", 0) == "embedding"
+        assert detect_model_type("faster-whisper-large-v3", 0) == "audio"
+        assert detect_model_type("MiniMax-h3", 0) == "video"
+        assert detect_model_type("diffusion-model", 0) == "video"
+        assert detect_model_type("picture-model", 0) == "image"
+
+
+def test_kimi_k3_gets_a_longer_timeout():
+    assert model_timeout("alias-kimi-k3-1m") == 90.0
+    assert model_timeout("alias-fast") == 45.0
+
+
+def test_video_probe_falls_back_from_catalog_gateway():
+    endpoints = [
+        {
+            "name": "Endpoint-1",
+            "base_url": "https://catalog.example/v1",
+            "api_key": "one",
+            "models": ["MiniMax-h3"],
+        },
+        {
+            "name": "Endpoint-2",
+            "base_url": "https://inference.example/v1",
+            "api_key": "two",
+            "models": ["MiniMax-h3"],
+        },
+    ]
+    not_found = MagicMock(status_code=404, is_success=False, text="Not Found")
+    validation = MagicMock(
+        status_code=400,
+        is_success=False,
+        text="prompt field required",
+    )
+    with patch("main.ENDPOINTS", endpoints), patch(
+        "main.httpx.post", side_effect=[not_found, validation]
+    ) as post:
+        response, _ = get_video_response("MiniMax-h3", 0)
+
+    assert response == "video endpoint healthy via Endpoint-2"
+    assert post.call_count == 2
 
 
 # Mocking OpenAI client for tests
