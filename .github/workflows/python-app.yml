@@ -28,7 +28,10 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install openai colorama python-dotenv flake8 pytest pytest-asyncio textual aiosqlite
+        # Pin openai to the 2.x line the app is written against: openai 3.x
+        # switched its HTTP backend to the `httpx2` fork and no longer pulls
+        # in `httpx`, which main.py and the tests import directly.
+        pip install "openai>=2,<3" httpx colorama python-dotenv flake8 pytest pytest-asyncio textual aiosqlite
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
     - name: Lint with flake8
       run: |
