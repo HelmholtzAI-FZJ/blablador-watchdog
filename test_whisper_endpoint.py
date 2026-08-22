@@ -5,12 +5,9 @@ Test the PTJ Whisper endpoint at https://ptj.blablador.fz-juelich.de/v1/
 import os
 import sys
 
-API_KEY = os.environ.get("OPENAI_API_KEY")
-if not API_KEY:
-    print("ERROR: OPENAI_API_KEY environment variable not set", file=sys.stderr)
-    sys.exit(1)
-
 import httpx
+
+API_KEY = os.environ.get("OPENAI_API_KEY")
 
 BASE_URL = "https://ptj.blablador.fz-juelich.de/v1"
 
@@ -66,6 +63,9 @@ def run_transcription_check(audio_file: str):
     return False
 
 if __name__ == "__main__":
+    if not API_KEY:
+        print("ERROR: OPENAI_API_KEY environment variable not set", file=sys.stderr)
+        sys.exit(1)
     print("=" * 60)
     print("Testing PTJ Whisper Endpoint")
     print(f"URL: {BASE_URL}")

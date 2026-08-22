@@ -10,6 +10,8 @@ from main import (
     model_timeout,
     is_retriable_error,
     retry_with_exponential_backoff,
+    DEFAULT_MODEL_TIMEOUT,
+    SLOW_REASONING_MODEL_TIMEOUT,
 )
 
 
@@ -161,8 +163,9 @@ def test_detects_model_capabilities_from_names_and_metadata():
 
 
 def test_kimi_k3_gets_a_longer_timeout():
-    assert model_timeout("alias-kimi-k3-1m") == 90.0
-    assert model_timeout("alias-fast") == 45.0
+    assert model_timeout("alias-kimi-k3-1m") == SLOW_REASONING_MODEL_TIMEOUT
+    assert model_timeout("alias-fast") == DEFAULT_MODEL_TIMEOUT
+    assert SLOW_REASONING_MODEL_TIMEOUT > DEFAULT_MODEL_TIMEOUT
 
 
 def test_video_probe_falls_back_from_catalog_gateway():
