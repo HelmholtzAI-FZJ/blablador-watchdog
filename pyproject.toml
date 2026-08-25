@@ -10,7 +10,7 @@ dependencies = [
     "textual",
     "aiosqlite",
     "pytest==9.0.3",
-    "pygments==2.20.0",
+    "pygments==2.21.0",
 ]
 
 [project.optional-dependencies]
