@@ -64,7 +64,7 @@ async def main():
         num_models = len(models_short)
         colors = plt.cm.tab20(range(num_models))
         model_colors = dict(zip(models_short, colors))
-        model_markers = dict(zip(models_short, MARKERS[:num_models]))
+        model_markers = {m: MARKERS[i % len(MARKERS)] for i, m in enumerate(models_short)}
 
         fig, axes = plt.subplots(2, 2, figsize=(14, 10))
         fig.suptitle("Model Metrics Dashboard", fontsize=14, fontweight="bold")

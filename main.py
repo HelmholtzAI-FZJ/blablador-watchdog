@@ -30,7 +30,25 @@ def model_timeout(model: str) -> float:
     normalized = model.lower()
     if "kimi-k3" in normalized or "kimi_k3" in normalized:
         return SLOW_REASONING_MODEL_TIMEOUT
+    if needs_low_reasoning(model):
+        # Thinking models spend tokens before answering; 70s is too tight.
+        return SLOW_REASONING_MODEL_TIMEOUT
     return DEFAULT_MODEL_TIMEOUT
+
+
+# Models that always think: they reject enable_thinking=False, so ask for
+# "low" reasoning effort instead and let them spend the tokens.
+LOW_REASONING_ONLY = (
+    "qwen3.8",       # 2.4T + variants; enable_thinking not supported
+    "alias-qwen-trillion",  # alias to the 2.4T
+    "alias-qwen-huge",
+    "alias-huge",
+)
+
+
+def needs_low_reasoning(model: str) -> bool:
+    normalized = model.lower()
+    return any(marker in normalized for marker in LOW_REASONING_ONLY)
 
 
 def is_retriable_error(error: Exception) -> Tuple[bool, Optional[float]]:
@@ -255,6 +273,14 @@ def detect_model_type(model: str, endpoint_id: int = 0) -> str:
     if is_embedding_model(model):
         return "embedding"
     if (
+        "qwen-image" in model_lower
+        or model_lower == "alias-image"
+        or "image generator" in model_lower
+        or "image" in task_type
+        or "image" in pipeline
+    ):
+        return "image"
+    if (
         "whisper" in model_lower
         or "transcription" in task_type
         or "speech-to-text" in task_type
@@ -414,6 +440,8 @@ def get_llm_response(prompt, model, endpoint_id: int = 0):
             normalized = m.lower()
             return "kimi-k3" in normalized or "kimi_k3" in normalized
 
+        # Models that always think: handled via module-level LOW_REASONING_ONLY.
+
         def request_completion(max_tokens):
             kwargs = {
                 "model": model,
@@ -428,7 +456,13 @@ def get_llm_response(prompt, model, endpoint_id: int = 0):
                 "presence_penalty": 1.5,
                 "frequency_penalty": 0,
             }
-            if supports_thinking_toggle(model):
+            if needs_low_reasoning(model):
+                # Must be checked BEFORE supports_thinking_toggle: names like
+                # "Qwen3.8-2.4T" contain "qwen3" but reject enable_thinking.
+                kwargs["extra_body"] = {
+                    "chat_template_kwargs": {"thinking_effort": "low"},
+                }
+            elif supports_thinking_toggle(model):
                 kwargs["extra_body"] = {
                     "top_k": 20,
                     "chat_template_kwargs": {"enable_thinking": False},
@@ -639,15 +673,22 @@ def check_model(model, word, prompt, endpoint_id: int = 0):
         return False, response, tokens_used
     if "Internal Server Error" in response:
         return False, response, tokens_used
-    return False, response, tokens_used
+    if response.startswith("An error occurred:"):
+        return False, response, tokens_used
+    # Model answered, but not with the expected word. Show its actual output
+    # as the failure reason instead of a bare FAIL.
+    return False, f"Wrong output: {response}", tokens_used
 
 
 class ModelStatus(Static):
-    def __init__(self, model):
+    def __init__(self, model, endpoint_id=0):
         self.model = model
+        self.endpoint_id = endpoint_id
         self.status = "PENDING"
+        self.error = None
         self.elapsed = None
-        super().__init__("", classes="pending")
+        self.thinking = needs_low_reasoning(model)
+        super().__init__("", classes="thinking" if self.thinking else "pending")
 
     def render(self):
         max_width = 30
@@ -670,17 +711,23 @@ class ModelStatus(Static):
             return f"{value[:max_width - 1]}…"
 
         model_text = truncate_text(self.model)
-        status_text = truncate_text(self.status)
-        return f"{model_text}\n{status_text}"
+        if self.status == "FAIL" and self.error:
+            # One line: model name, then the error. Color shows OK/FAIL.
+            err = str(self.error).replace("\n", " ")
+            return truncate_text(f"{model_text} {err}")
+        return model_text
 
-    def set_status(self, status):
+    def set_status(self, status, error=None):
         self.status = status
+        self.error = error
         self.update(self.render())
-        self.remove_class("pending", "ok", "fail")
+        self.remove_class("pending", "ok", "fail", "thinking")
         if status == "OK":
             self.add_class("ok")
         elif status == "FAIL":
             self.add_class("fail")
+        elif self.thinking:
+            self.add_class("thinking")
         else:
             self.add_class("pending")
 
@@ -724,9 +771,8 @@ class WatchdogApp(App):
     }
 
     ModelStatus {
-        border: round #2a3240;
-        padding: 1 2;
-        height: 6;
+        padding: 0 1;
+        height: 1;
         text-align: left;
         text-wrap: nowrap;
         text-overflow: ellipsis;
@@ -740,16 +786,19 @@ class WatchdogApp(App):
         color: #9aa4b2;
     }
 
+    ModelStatus.thinking {
+        background: #332a10;
+        color: #f5d76e;
+    }
+
     ModelStatus.ok {
         background: #0f2b1a;
         color: #7de6b4;
-        border: round #1f5f3f;
     }
 
     ModelStatus.fail {
         background: #351315;
         color: #ff9a9a;
-        border: round #6b2c2f;
     }
     """
 
@@ -774,6 +823,11 @@ class WatchdogApp(App):
         if self.status_line:
             self.status_line.update("Loading models...")
         models_with_endpoints = await asyncio.to_thread(get_all_models_from_endpoints)
+        # Skip image models entirely: not LLMs, chat probes just time out.
+        models_with_endpoints = [
+            (m, e) for m, e in models_with_endpoints
+            if detect_model_type(m, e) != "image"
+        ]
         self.models_with_endpoints = models_with_endpoints
         self.model_widgets = {}
 
@@ -785,7 +839,7 @@ class WatchdogApp(App):
         # Group models by endpoint for display
         for model, endpoint_id in models_with_endpoints:
             endpoint_name = ENDPOINTS[endpoint_id]["name"] if endpoint_id < len(ENDPOINTS) else f"Endpoint-{endpoint_id}"
-            widget = ModelStatus(f"{model} [{endpoint_name}]")
+            widget = ModelStatus(model, endpoint_id)
             widget.model = model  # Store original model name
             widget.endpoint_id = endpoint_id  # Store endpoint ID
             self.model_widgets[(model, endpoint_id)] = widget
@@ -844,13 +898,13 @@ class WatchdogApp(App):
                 endpoint_name = ENDPOINTS[endpoint_id]["name"] if endpoint_id < len(ENDPOINTS) else f"Endpoint-{endpoint_id}"
                 self.status_line.update(f"Testing {index}/{total}: {model} [{endpoint_name}]")
             widget = self.model_widgets.get((model, endpoint_id))
+            error_msg = None if ok else response
             if widget:
-                widget.set_status("OK" if ok else "FAIL")
+                widget.set_status("OK" if ok else "FAIL", error=error_msg)
                 widget.set_elapsed(elapsed)
             tokens_per_s = None
             if tokens_used and elapsed and elapsed > 0:
                 tokens_per_s = tokens_used / elapsed
-            error_msg = None if ok else response
             await record_metric(
                 model, ok, elapsed, tokens_used, tokens_per_s, error_msg
             )
@@ -903,6 +957,11 @@ async def run_quiet():
         "No sentences, no explanations, no definitions. Just the word."
     )
     models_with_endpoints = await asyncio.to_thread(get_all_models_from_endpoints)
+    # Skip image models entirely: not LLMs, chat probes just time out.
+    models_with_endpoints = [
+        (m, e) for m, e in models_with_endpoints
+        if detect_model_type(m, e) != "image"
+    ]
     if not models_with_endpoints:
         print("No models available.")
         return
