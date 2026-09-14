@@ -642,3 +642,56 @@ class TestRerankingModels:
 
         assert ok is False
         assert response.startswith("Wrong ranking:")
+
+
+class TruncatedResponse:
+    """Thinking model that spent the token budget before writing the word."""
+
+    def __iter__(self):
+        yield ChatChunk(content="pot", finish_reason="length")
+        yield ChatChunk(total_tokens=120)
+
+
+class StillTruncatedResponse:
+    def __iter__(self):
+        yield ChatChunk(content="pot", finish_reason="length")
+        yield ChatChunk(total_tokens=600)
+
+
+class TestTruncatedThinkingOutput:
+    """A 30-token budget spent on reasoning truncates "potato" to "pot"."""
+
+    def make_client(self, *responses):
+        client = mock_openai_client()
+        client.chat.completions.create = MagicMock(side_effect=list(responses))
+        return client
+
+    def test_truncated_answer_is_retried_with_more_tokens(self):
+        client = self.make_client(TruncatedResponse(), ChatResponse())
+        with patch("main.client", client):
+            response, _ = get_llm_response("Give me ONLY a word.", "alias-fast")
+
+        assert "Potato" in response
+        attempts = [
+            call.kwargs["max_tokens"]
+            for call in client.chat.completions.create.call_args_list
+        ]
+        assert attempts == [30, 512]
+
+    def test_truncated_answer_is_reported_as_truncation_not_wrong_output(self):
+        client = self.make_client(TruncatedResponse(), StillTruncatedResponse())
+        with patch("main.client", client), patch("main.ENDPOINTS", [rerank_endpoint()]):
+            ok, response, _ = check_model(
+                "alias-fast", "potato", "Give me ONLY a word.", 0
+            )
+
+        assert ok is False
+        assert response.startswith("An error occurred: Truncated output")
+
+    def test_complete_answer_is_not_retried(self):
+        client = self.make_client(ChatResponse())
+        with patch("main.client", client):
+            response, _ = get_llm_response("Give me ONLY a word.", "alias-fast")
+
+        assert "Potato" in response
+        assert client.chat.completions.create.call_count == 1

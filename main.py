@@ -556,13 +556,20 @@ def get_llm_response(prompt, model, endpoint_id: int = 0):
 
         response = request_completion(30)
         content, reasoning, finish_reason, tokens_used = consume_completion_stream(response)
-        if content:
+        if content and finish_reason != "length":
             return content, tokens_used
-        if reasoning and finish_reason == "length":
-            # Thinking models: try with more tokens to get actual content.
+        if finish_reason == "length":
+            # Thinking models spend the 30-token budget on reasoning before
+            # writing the word, which truncates the answer to "pot". Retry with
+            # room before judging it, so truncation is not read as wrong output.
             response = request_completion(512)
-            content, reasoning_retry, _, tokens_used = consume_completion_stream(response)
+            content, reasoning_retry, finish_reason, tokens_used = consume_completion_stream(response)
             if content:
+                if finish_reason == "length":
+                    return (
+                        f"An error occurred: Truncated output after 512 tokens: {content!r}",
+                        tokens_used,
+                    )
                 return content, tokens_used
             if reasoning_retry:
                 return reasoning_retry[:500], tokens_used
