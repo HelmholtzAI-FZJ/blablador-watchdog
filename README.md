@@ -6,6 +6,21 @@ This checks if blablador is working correctly with a capability-appropriate prob
 ./run.sh
 ```
 
+`run.sh` runs `main.py` with the Textual UI by default. Pass `--quiet` (or `-q`)
+to get the plain-text report instead — that is the mode cron jobs use. The report
+starts with the model-list diff, then successes and failures.
+
+Every run records the discovered model list in
+`~/.blablador_watchdog/last_models.json`, so models that disappear from the
+gateway catalog are reported as `Models missing since last run`. A run that
+discovers no models (gateway/auth failure) keeps the previous list instead of
+reporting every model as gone.
+
+```bash
+python3 main.py --quiet   # headless report
+python3 main.py           # interactive Textual dashboard
+```
+
 ## Installation
 
 ```bash

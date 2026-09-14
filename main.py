@@ -1,7 +1,9 @@
 import asyncio
+import json
 import os
 import time
 import random
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict
 
@@ -24,6 +26,10 @@ MAX_DELAY = 10.0  # seconds
 BACKOFF_FACTOR = 2.0
 DEFAULT_MODEL_TIMEOUT = 70.0
 SLOW_REASONING_MODEL_TIMEOUT = 200.0
+
+# Model list from the previous run, so a model that disappears from the
+# gateway catalog can be reported.
+DEFAULT_MODEL_STATE_PATH = os.path.expanduser("~/.blablador_watchdog/last_models.json")
 
 
 def model_timeout(model: str) -> float:
@@ -338,6 +344,75 @@ def get_all_models_from_endpoints() -> List[Tuple[str, int]]:
             ep["model_metadata"] = {}
     
     return all_models
+
+
+def model_tags(models_with_endpoints: List[Tuple[str, int]]) -> List[str]:
+    """Stable identifiers for a discovered model list: "<endpoint_id>:<model>"."""
+    return sorted(
+        f"{endpoint_id}:{model}" for model, endpoint_id in models_with_endpoints
+    )
+
+
+def load_model_state(path: str = DEFAULT_MODEL_STATE_PATH) -> List[str]:
+    """Model tags recorded by the previous run; empty when there is no state."""
+    try:
+        with open(path) as state_file:
+            state = json.load(state_file)
+    except (OSError, ValueError):
+        return []
+    tags = state.get("models") if isinstance(state, dict) else None
+    if not isinstance(tags, list):
+        return []
+    return [str(tag) for tag in tags]
+
+
+def save_model_state(
+    models_with_endpoints: List[Tuple[str, int]],
+    path: str = DEFAULT_MODEL_STATE_PATH,
+) -> None:
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(path, "w") as state_file:
+        json.dump(
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "models": model_tags(models_with_endpoints),
+            },
+            state_file,
+            indent=2,
+        )
+
+
+def describe_model_tag(tag: str) -> str:
+    endpoint_id, _, model = tag.partition(":")
+    if endpoint_id.isdigit() and int(endpoint_id) < len(ENDPOINTS):
+        endpoint_name = ENDPOINTS[int(endpoint_id)]["name"]
+    elif endpoint_id.isdigit():
+        endpoint_name = f"Endpoint-{int(endpoint_id) + 1}"
+    else:
+        endpoint_name = endpoint_id or "unknown"
+    return f"[{endpoint_name}] {model}"
+
+
+def model_list_change_report(previous: List[str], current: List[str]) -> List[str]:
+    """Report models that vanished from (or appeared in) the gateway catalog."""
+    previous_tags, current_tags = set(previous), set(current)
+    if not current_tags:
+        # A gateway failure must not be reported as "every model disappeared".
+        return [
+            f"Model list: no models discovered this run "
+            f"(kept the previous list of {len(previous_tags)})"
+        ]
+    if not previous_tags:
+        return [f"Model list: no previous run recorded, saved {len(current_tags)} models"]
+    missing = sorted(previous_tags - current_tags)
+    added = sorted(current_tags - previous_tags)
+    lines = [f"Models missing since last run ({len(missing)}):"]
+    lines.extend([f"  {describe_model_tag(tag)}" for tag in missing] or ["  - none"])
+    lines.append(f"Models new since last run ({len(added)}):")
+    lines.extend([f"  {describe_model_tag(tag)}" for tag in added] or ["  - none"])
+    return lines
 
 
 def extract_usage_tokens(response):
@@ -806,6 +881,8 @@ class WatchdogApp(App):
         super().__init__()
         self.model_widgets = {}
         self.models = []
+        self.previous_models = []
+        self.current_models = []
         self.grid = None
         self.status_line = None
 
@@ -822,10 +899,14 @@ class WatchdogApp(App):
     async def load_models(self):
         if self.status_line:
             self.status_line.update("Loading models...")
-        models_with_endpoints = await asyncio.to_thread(get_all_models_from_endpoints)
+        discovered_models = await asyncio.to_thread(get_all_models_from_endpoints)
+        self.previous_models = load_model_state()
+        if discovered_models:
+            save_model_state(discovered_models)
+        self.current_models = model_tags(discovered_models)
         # Skip image models entirely: not LLMs, chat probes just time out.
         models_with_endpoints = [
-            (m, e) for m, e in models_with_endpoints
+            (m, e) for m, e in discovered_models
             if detect_model_type(m, e) != "image"
         ]
         self.models_with_endpoints = models_with_endpoints
@@ -916,7 +997,9 @@ class WatchdogApp(App):
         successes.sort(key=lambda item: tokens_sort_key(item[3]), reverse=True)
         failures.sort(key=lambda item: tokens_sort_key(item[4]), reverse=True)
 
-        report_lines = [f"Successes ({len(successes)}):"]
+        report_lines = model_list_change_report(self.previous_models, self.current_models)
+        report_lines.append("")
+        report_lines.append(f"Successes ({len(successes)}):")
         if successes:
             for model, endpoint_id, elapsed, tokens_per_s in successes:
                 endpoint_name = ENDPOINTS[endpoint_id]["name"] if endpoint_id < len(ENDPOINTS) else f"Endpoint-{endpoint_id}"
@@ -956,14 +1039,19 @@ async def run_quiet():
         f"Give me ONLY a word. The word is {word}. Nothing else. "
         "No sentences, no explanations, no definitions. Just the word."
     )
-    models_with_endpoints = await asyncio.to_thread(get_all_models_from_endpoints)
+    discovered_models = await asyncio.to_thread(get_all_models_from_endpoints)
+    previous_models = load_model_state()
+    if discovered_models:
+        save_model_state(discovered_models)
+    current_models = model_tags(discovered_models)
     # Skip image models entirely: not LLMs, chat probes just time out.
     models_with_endpoints = [
-        (m, e) for m, e in models_with_endpoints
+        (m, e) for m, e in discovered_models
         if detect_model_type(m, e) != "image"
     ]
     if not models_with_endpoints:
         print("No models available.")
+        print("\n".join(model_list_change_report(previous_models, current_models)))
         return
 
     async def check_one(model: str, endpoint_id: int):
@@ -1012,7 +1100,8 @@ async def run_quiet():
     def fmt_tps(val):
         return f"{val:.1f} tok/s" if val else "n/a"
 
-    print(f"Successes ({len(successes)}):")
+    print("\n".join(model_list_change_report(previous_models, current_models)))
+    print(f"\nSuccesses ({len(successes)}):")
     if successes:
         for model, endpoint_name, elapsed, tokens_per_s in successes:
             print(f"  [{endpoint_name}] {model} :: {elapsed:.2f}s :: {fmt_tps(tokens_per_s)}")
@@ -1030,7 +1119,7 @@ async def run_quiet():
 
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "--quiet":
+    if any(arg in ("--quiet", "-q") for arg in sys.argv[1:]):
         asyncio.run(run_quiet())
     else:
         WatchdogApp().run()

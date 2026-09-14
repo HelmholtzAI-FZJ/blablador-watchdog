@@ -10,6 +10,10 @@ from main import (
     model_timeout,
     is_retriable_error,
     retry_with_exponential_backoff,
+    load_model_state,
+    save_model_state,
+    model_tags,
+    model_list_change_report,
     DEFAULT_MODEL_TIMEOUT,
     SLOW_REASONING_MODEL_TIMEOUT,
 )
@@ -487,3 +491,57 @@ class TestEdgeCases:
             assert response == "test"
             # Tokens should handle missing usage gracefully
             assert tokens is None or isinstance(tokens, dict)
+
+
+class TestModelListState:
+    """The model list of the previous run, used to report vanished models."""
+
+    def test_round_trip_records_sorted_tags(self, tmp_path):
+        state_path = str(tmp_path / "last_models.json")
+        save_model_state([("alias-fast", 0), ("alias-code", 0)], path=state_path)
+
+        assert load_model_state(path=state_path) == ["0:alias-code", "0:alias-fast"]
+
+    def test_no_state_file_returns_empty_list(self, tmp_path):
+        assert load_model_state(path=str(tmp_path / "missing.json")) == []
+
+    def test_corrupt_state_file_returns_empty_list(self, tmp_path):
+        state_path = tmp_path / "last_models.json"
+        state_path.write_text("{not json")
+        assert load_model_state(path=str(state_path)) == []
+
+    def test_missing_models_are_reported(self):
+        with patch("main.ENDPOINTS", [{"name": "Endpoint-1"}]):
+            report = model_list_change_report(
+                previous=["0:alias-fast", "0:alias-gone"],
+                current=["0:alias-fast"],
+            )
+
+        assert report[0] == "Models missing since last run (1):"
+        assert report[1] == "  [Endpoint-1] alias-gone"
+        assert report[2] == "Models new since last run (0):"
+        assert report[3] == "  - none"
+
+    def test_new_models_are_reported(self):
+        with patch("main.ENDPOINTS", [{"name": "Endpoint-1"}]):
+            report = model_list_change_report(previous=[], current=["0:alias-new"])
+
+        assert report == ["Model list: no previous run recorded, saved 1 models"]
+
+    def test_empty_catalog_keeps_previous_list(self):
+        report = model_list_change_report(previous=["0:alias-fast"], current=[])
+
+        assert report == [
+            "Model list: no models discovered this run (kept the previous list of 1)"
+        ]
+
+    def test_identical_lists_report_nothing_missing(self):
+        with patch("main.ENDPOINTS", [{"name": "Endpoint-1"}]):
+            report = model_list_change_report(previous=["0:a"], current=["0:a"])
+
+        assert report == [
+            "Models missing since last run (0):",
+            "  - none",
+            "Models new since last run (0):",
+            "  - none",
+        ]
