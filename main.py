@@ -260,6 +260,10 @@ def is_embedding_model(model):
     return model in EMBEDDING_MODELS
 
 
+def is_reranking_model(model) -> bool:
+    return "rerank" in model.lower()
+
+
 def model_metadata(model: str, endpoint_id: int = 0) -> Dict:
     if endpoint_id >= len(ENDPOINTS):
         return {}
@@ -278,6 +282,8 @@ def detect_model_type(model: str, endpoint_id: int = 0) -> str:
 
     if is_embedding_model(model):
         return "embedding"
+    if is_reranking_model(model):
+        return "rerank"
     if (
         "qwen-image" in model_lower
         or model_lower == "alias-image"
@@ -709,6 +715,55 @@ def get_image_response(model: str, endpoint_id: int = 0):
         return f"An error occurred: {error}", None
 
 
+RERANK_QUERY = "potato"
+# One document that must win for the query, and one that must not. A reranking
+# model that cannot separate them is broken even when the route answers 200.
+RERANK_DOCUMENTS = (
+    "a potato is a starchy root vegetable",
+    "quantum chromodynamics describes the gluon field",
+)
+
+
+@retry_with_exponential_backoff
+def get_rerank_response(model: str, endpoint_id: int = 0):
+    """Exercise an OpenAI-compatible rerank endpoint (Jina/Cohere style)."""
+    try:
+        base_url, headers = _endpoint_request_config(endpoint_id)
+        response = httpx.post(
+            f"{base_url}/rerank",
+            headers={**headers, "Content-Type": "application/json"},
+            json={
+                "model": model,
+                "query": RERANK_QUERY,
+                "documents": list(RERANK_DOCUMENTS),
+            },
+            timeout=40.0,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        results = payload.get("results")
+        if not isinstance(results, list) or len(results) < len(RERANK_DOCUMENTS):
+            return "An error occurred: Invalid rerank response", None
+        scores = {
+            item.get("index"): item.get("relevance_score")
+            for item in results
+            if isinstance(item, dict)
+        }
+        relevant, irrelevant = scores.get(0), scores.get(1)
+        if not isinstance(relevant, (int, float)) or not isinstance(
+            irrelevant, (int, float)
+        ):
+            return "An error occurred: Invalid rerank response", None
+        summary = f"rerank scores: relevant={relevant:.4f} irrelevant={irrelevant:.4f}"
+        if relevant > irrelevant:
+            return summary, None
+        # The route works, but the ranking is wrong: report it like a model that
+        # answered the wrong word.
+        return f"Wrong ranking: {summary}", None
+    except Exception as error:
+        return f"An error occurred: {error}", None
+
+
 def check_model(model, word, prompt, endpoint_id: int = 0):
     model_type = detect_model_type(model, endpoint_id)
     if model_type == "embedding":
@@ -724,6 +779,14 @@ def check_model(model, word, prompt, endpoint_id: int = 0):
         if "Internal Server Error" in response:
             return False, response, tokens_used
         return False, response, tokens_used
+
+    if model_type == "rerank":
+        response, tokens_used = get_rerank_response(model, endpoint_id)
+        return (
+            not response.startswith(("An error occurred:", "Wrong ranking:")),
+            response,
+            tokens_used,
+        )
 
     if model_type == "audio":
         response, tokens_used = get_audio_response(model, endpoint_id)

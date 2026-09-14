@@ -4,9 +4,11 @@ import pytest
 from main import (
     detect_model_type,
     get_video_response,
+    get_rerank_response,
     get_available_models,
     get_llm_response,
     get_embedding_response,
+    check_model,
     model_timeout,
     is_retriable_error,
     retry_with_exponential_backoff,
@@ -545,3 +547,98 @@ class TestModelListState:
             "Models new since last run (0):",
             "  - none",
         ]
+
+
+def rerank_endpoint():
+    """Endpoint dict shaped like a real /v1 gateway entry."""
+    return {
+        "name": "Endpoint-1",
+        "base_url": "https://gateway.example/v1",
+        "api_key": "secret",
+        "model_metadata": {},
+    }
+
+
+class TestRerankingModels:
+    """Reranking models answer on /rerank only: chat probes 404 and fail."""
+
+    def test_reranking_models_are_detected(self):
+        with patch("main.ENDPOINTS", [rerank_endpoint()]):
+            assert detect_model_type("alias-qwen3-8b-reranking", 0) == "rerank"
+            assert detect_model_type("alias-qwen3-4b-reranking", 0) == "rerank"
+            assert detect_model_type("Qwen3-Reranker-8B", 0) == "rerank"
+            assert detect_model_type("alias-qwen3-8b-embeddings", 0) == "embedding"
+            assert detect_model_type("alias-fast", 0) == "chat"
+
+    def test_rerank_probe_posts_query_and_documents(self):
+        response = MagicMock(status_code=200, is_success=True)
+        response.json.return_value = {
+            "results": [
+                {"index": 0, "relevance_score": 0.93},
+                {"index": 1, "relevance_score": 0.00003},
+            ]
+        }
+        with patch("main.ENDPOINTS", [rerank_endpoint()]), patch(
+            "main.httpx.post", return_value=response
+        ) as post:
+            message, tokens = get_rerank_response("alias-qwen3-8b-reranking", 0)
+
+        assert message == "rerank scores: relevant=0.9300 irrelevant=0.0000"
+        assert tokens is None
+        assert post.call_args.args[0] == "https://gateway.example/v1/rerank"
+        body = post.call_args.kwargs["json"]
+        assert body["model"] == "alias-qwen3-8b-reranking"
+        assert body["query"] == "potato"
+        assert len(body["documents"]) == 2
+        assert post.call_args.kwargs["headers"]["Authorization"] == "Bearer secret"
+
+    def test_rerank_probe_rejects_wrong_ranking(self):
+        response = MagicMock(status_code=200, is_success=True)
+        response.json.return_value = {
+            "results": [
+                {"index": 0, "relevance_score": 0.01},
+                {"index": 1, "relevance_score": 0.99},
+            ]
+        }
+        with patch("main.ENDPOINTS", [rerank_endpoint()]), patch(
+            "main.httpx.post", return_value=response
+        ):
+            message, _ = get_rerank_response("alias-qwen3-8b-reranking", 0)
+
+        assert message.startswith("Wrong ranking:")
+
+    def test_rerank_probe_reports_route_errors(self):
+        with patch("main.ENDPOINTS", [rerank_endpoint()]), patch(
+            "main.httpx.post", side_effect=Exception("Connection refused")
+        ):
+            message, _ = get_rerank_response("alias-qwen3-8b-reranking", 0)
+
+        assert message.startswith("An error occurred:")
+
+    def test_check_model_routes_reranking_models_to_rerank_probe(self):
+        with patch("main.ENDPOINTS", [rerank_endpoint()]), patch(
+            "main.get_llm_response"
+        ) as chat, patch(
+            "main.get_rerank_response",
+            return_value=("rerank scores: relevant=0.9 irrelevant=0.0", None),
+        ) as rerank:
+            ok, response, _ = check_model(
+                "alias-qwen3-8b-reranking", "potato", "Give me ONLY a word.", 0
+            )
+
+        assert ok is True
+        assert response.startswith("rerank scores:")
+        assert rerank.call_args.args == ("alias-qwen3-8b-reranking", 0)
+        assert not chat.called
+
+    def test_check_model_fails_reranking_model_with_wrong_ranking(self):
+        with patch("main.ENDPOINTS", [rerank_endpoint()]), patch(
+            "main.get_rerank_response",
+            return_value=("Wrong ranking: rerank scores: relevant=0.0 irrelevant=0.9", None),
+        ):
+            ok, response, _ = check_model(
+                "alias-qwen3-4b-reranking", "potato", "Give me ONLY a word.", 0
+            )
+
+        assert ok is False
+        assert response.startswith("Wrong ranking:")
