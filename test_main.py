@@ -16,6 +16,8 @@ from main import (
     save_model_state,
     model_tags,
     model_list_change_report,
+    shorten_error,
+    MAX_ERROR_REASON_CHARS,
     DEFAULT_MODEL_TIMEOUT,
     SLOW_REASONING_MODEL_TIMEOUT,
 )
@@ -695,3 +697,95 @@ class TestTruncatedThinkingOutput:
 
         assert "Potato" in response
         assert client.chat.completions.create.call_count == 1
+
+
+class Base64ImageResponse:
+    """A model answering the chat probe with a generated image data URL."""
+
+    def __init__(self, payload_chars: int = 700_000):
+        self.payload = (
+            "![generated image](data:image/jpeg;base64," + "A" * payload_chars + ")"
+        )
+
+    def __iter__(self):
+        yield ChatChunk(content=self.payload, finish_reason="stop")
+        yield ChatChunk(total_tokens=1024)
+
+
+class WrongWordResponse:
+    def __iter__(self):
+        yield ChatChunk(content="rabbit", finish_reason="stop")
+        yield ChatChunk(total_tokens=7)
+
+
+class TestImageGeneratorModels:
+    """Image generators render on /images/generations: a chat probe is not a test."""
+
+    def test_flux_models_are_detected_as_image(self):
+        with patch("main.ENDPOINTS", [rerank_endpoint()]):
+            assert detect_model_type("alias-flux2", 0) == "image"
+            assert (
+                detect_model_type(
+                    "999 - FLUX.2-dev - An image generator (Black Forest Labs)", 0
+                )
+                == "image"
+            )
+            assert detect_model_type("999 - Qwen-Image-2512 - An image generator", 0) == "image"
+            assert detect_model_type("alias-image", 0) == "image"
+            assert detect_model_type("alias-fast", 0) == "chat"
+
+    def test_flux_alias_is_probed_on_the_image_route_not_chat(self):
+        validation = MagicMock(
+            status_code=400, is_success=False, text="prompt field required"
+        )
+        with patch("main.ENDPOINTS", [rerank_endpoint()]), patch(
+            "main.httpx.post", return_value=validation
+        ) as post:
+            ok, response, _ = check_model(
+                "alias-flux2", "potato", "Give me ONLY a word.", 0
+            )
+
+        assert ok is True
+        assert response == "image endpoint healthy (prompt validation passed)"
+        assert isinstance(response, str)
+        assert post.call_args.args[0].endswith("/images/generations")
+
+
+class TestOversizedFailureReasons:
+    """A data URL answer used to dump 868 KB into the report and the metrics DB."""
+
+    def make_client(self, *responses):
+        client = mock_openai_client()
+        client.chat.completions.create = MagicMock(side_effect=list(responses))
+        return client
+
+    def test_base64_image_answer_is_capped_before_reporting(self):
+        stream = Base64ImageResponse()
+        client = self.make_client(stream)
+        with patch("main.client", client), patch("main.ENDPOINTS", [rerank_endpoint()]):
+            ok, response, _ = check_model(
+                "alias-fast", "potato", "Give me ONLY a word.", 0
+            )
+
+        assert ok is False
+        assert response.startswith(
+            "Wrong output: ![generated image](data:image/jpeg;base64,"
+        )
+        assert len(response) <= MAX_ERROR_REASON_CHARS + 40
+        assert "+699" in response and "chars dropped" in response
+        assert "A" * (MAX_ERROR_REASON_CHARS + 50) not in response
+
+    def test_short_failure_reason_is_kept_verbatim(self):
+        client = self.make_client(WrongWordResponse())
+        with patch("main.client", client), patch("main.ENDPOINTS", [rerank_endpoint()]):
+            ok, response, _ = check_model(
+                "alias-fast", "potato", "Give me ONLY a word.", 0
+            )
+
+        assert ok is False
+        assert response == "Wrong output: rabbit"
+
+    def test_shorten_error_is_a_no_op_below_the_limit(self):
+        assert shorten_error("Wrong output: rabbit") == "Wrong output: rabbit"
+        long_reason = "x" * (MAX_ERROR_REASON_CHARS + 10)
+        assert shorten_error(long_reason).endswith("[+10 chars dropped]")

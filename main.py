@@ -27,6 +27,12 @@ BACKOFF_FACTOR = 2.0
 DEFAULT_MODEL_TIMEOUT = 70.0
 SLOW_REASONING_MODEL_TIMEOUT = 200.0
 
+# Failure reasons are printed in the report and stored in the metrics DB, so a
+# model that answers with a base64 data URL must not be able to dump megabytes
+# into either. Measured: FLUX aliases answered the chat probe with an 868 KB
+# data:image/jpeg payload.
+MAX_ERROR_REASON_CHARS = 200
+
 # Model list from the previous run, so a model that disappears from the
 # gateway catalog can be reported.
 DEFAULT_MODEL_STATE_PATH = os.path.expanduser("~/.blablador_watchdog/last_models.json")
@@ -287,6 +293,7 @@ def detect_model_type(model: str, endpoint_id: int = 0) -> str:
     if (
         "qwen-image" in model_lower
         or model_lower == "alias-image"
+        or "flux" in model_lower
         or "image generator" in model_lower
         or "image" in task_type
         or "image" in pipeline
@@ -771,7 +778,23 @@ def get_rerank_response(model: str, endpoint_id: int = 0):
         return f"An error occurred: {error}", None
 
 
+def shorten_error(reason: str, limit: int = MAX_ERROR_REASON_CHARS) -> str:
+    """Cap a failure reason so a huge model payload never reaches a report."""
+    text = str(reason)
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}… [+{len(text) - limit} chars dropped]"
+
+
 def check_model(model, word, prompt, endpoint_id: int = 0):
+    """Probe a model, keeping the failure reason short enough to report."""
+    ok, response, tokens_used = _probe_model(model, word, prompt, endpoint_id)
+    if ok:
+        return ok, response, tokens_used
+    return False, shorten_error(str(response)), tokens_used
+
+
+def _probe_model(model, word, prompt, endpoint_id: int = 0):
     model_type = detect_model_type(model, endpoint_id)
     if model_type == "embedding":
         response, tokens_used = get_embedding_response(word, model, endpoint_id)
