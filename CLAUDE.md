@@ -3,6 +3,26 @@
 Operating notes for agents working in this repo. Read before changing probe
 behaviour; update it in the same commit as the change it describes.
 
+## Committing is part of the task
+
+Every change here lands as a commit **and** updates this file in the same
+commit. Do not finish a task with "want me to commit?" or with a pending doc
+edit — Alex asked for this explicitly, so stop asking.
+
+- Stage the files of your change by name (`git add main.py test_main.py
+  CLAUDE.md`). Never `git add -A` / `git commit -a`: `README.md`,
+  `vllm_jobs.py`, `test_vllm_jobs.py`, `bench2.py`, the generated PNGs and
+  `shinrai/` routinely hold unrelated in-progress work, so the tree is usually
+  dirty at session start even when the workspace snapshot says clean.
+- No pushing unless asked.
+- `git` needs the CommandLineTools toolchain on this Mac — plain `/usr/bin/git`
+  dies with "You have not agreed to the Xcode license agreements":
+  `DEVELOPER_DIR=/Library/Developer/CommandLineTools git status`. Same root
+  cause as the unusable system `python3`; `.venv/bin/python` is unaffected.
+- If a write to this file is refused because an approval prompt timed out, say
+  so and leave the proposed text for the user — do not report the doc as
+  updated.
+
 ## What lives here
 
 | File | Role |
@@ -50,6 +70,17 @@ A 200 is not proof of health for reranking: the probe asserts the potato
 document outranks an unrelated one and reports `Wrong ranking:` otherwise.
 Route-validation probes (audio/video/image) intentionally do not start
 expensive generation jobs — keep it that way.
+
+Image models must be detected by name, because the gateway cannot tell us:
+`api.blablador.fz-juelich.de` returns no `task_type` or `pipeline_*` metadata,
+so `flux` (and any new generator alias) belongs in the marker list in
+`detect_model_type()`. This is not cosmetic — `alias-flux2` answers the potato
+prompt on `/v1/chat/completions` with HTTP 200 in ~20s and
+`content: "![generated image](data:image/jpeg;base64,…)"`, i.e. a real
+1024x1024 render, which the probe then reports as `Wrong output:` with the whole
+data URL attached (868 KB measured in `model_metrics`).
+`MAX_ERROR_REASON_CHARS` (200, applied in `check_model()` for every model type)
+bounds failure reasons so no model payload reaches a report or the database.
 
 ## Thinking models: two tiers, plus a token budget that truncates
 
@@ -102,6 +133,11 @@ accepts that as a last resort, truncated to 500 chars.
 - CI (`.github/workflows/python-app.yml`) runs `pytest` and then
   `python3 main.py --quiet` against the real gateway. Keep `openai<3` pinned —
   openai 3.x dropped the `httpx` dependency that `main.py` imports directly.
+- Failure reasons are printed verbatim and stored in `model_metrics.error`, so
+  they are capped at `MAX_ERROR_REASON_CHARS` (200) in `check_model()`. Scope
+  metrics-DB queries by row id, not by timestamp: `timestamp` is ISO-8601 with
+  a `T` separator, so `timestamp > datetime('now','-30 minutes')` matches every
+  row of the same day.
 
 ## Tests
 
