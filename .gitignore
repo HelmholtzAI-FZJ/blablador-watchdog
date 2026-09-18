@@ -156,3 +156,4 @@ cython_debug/
 
 # Generated plots
 metrics_plots.png
+supercomputer_model_status.png
