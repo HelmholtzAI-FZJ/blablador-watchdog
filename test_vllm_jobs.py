@@ -8,9 +8,9 @@ def test_extract_model_prefers_served_model_name():
 
 def test_parse_running_vllm_job():
     output = "ACTIVE|123|RUNNING|00:12:03|None|vllm-alias-fast|python -m vllm.entrypoints.openai.api_server --model alias-fast\n"
-    jobs = parse_job_rows("jureca", output)
+    jobs = parse_job_rows("jh", output)
     assert len(jobs) == 1
-    assert jobs[0].cluster == "jureca"
+    assert jobs[0].cluster == "jh"
     assert jobs[0].model == "alias-fast"
     assert jobs[0].elapsed_seconds == 723
 
@@ -62,7 +62,7 @@ def test_old_pending_job_is_stuck():
 
 def test_recent_failed_vllm_job_is_dead():
     output = "RECENT|126|FAILED|00:03:00|vllm-alias-mis\n"
-    statuses = build_statuses(parse_job_rows("jureca", output), 1800, 600)
+    statuses = build_statuses(parse_job_rows("jh", output), 1800, 600)
     assert statuses[0].model == "alias-mis"
     assert statuses[0].status == "dead"
     assert statuses[0].availability is False

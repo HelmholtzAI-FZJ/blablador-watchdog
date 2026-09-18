@@ -16,7 +16,7 @@ from metrics import (
 )
 
 
-DEFAULT_CLUSTERS = ("jureca", "booster", "jupiter", "haicluster1")
+DEFAULT_CLUSTERS = ("jh", "booster", "jupiter", "haicluster1")
 INFERENCE_SERVER_RE = re.compile(
     r"\b(vllm|api_server|openai[._-]api|whisper_openai_api)\b",
     re.I,
