@@ -1,4 +1,7 @@
 from unittest.mock import patch, MagicMock
+import asyncio
+import threading
+import time
 import pytest
 
 from main import (
@@ -12,6 +15,7 @@ from main import (
     model_timeout,
     is_retriable_error,
     retry_with_exponential_backoff,
+    to_daemon_thread,
     load_model_state,
     save_model_state,
     model_tags,
@@ -26,7 +30,7 @@ from main import (
 # Mocking OpenAI client
 class MockOpenAI:
     class MockModels:
-        def list(self):
+        def list(self, **kwargs):
             return ModelsResponse()
 
     class MockChat:
@@ -172,6 +176,9 @@ def test_detects_model_capabilities_from_names_and_metadata():
 
 def test_kimi_k3_gets_a_longer_timeout():
     assert model_timeout("alias-kimi-k3-1m") == SLOW_REASONING_MODEL_TIMEOUT
+    assert model_timeout("10 - Qwen 3.8-27B with DFlash") == SLOW_REASONING_MODEL_TIMEOUT
+    assert model_timeout("15 - DeepSeek-V4.1-Flash on JUWELS Booster") == SLOW_REASONING_MODEL_TIMEOUT
+    assert model_timeout("alias-deepseek-v41-flash-booster") == SLOW_REASONING_MODEL_TIMEOUT
     assert model_timeout("alias-fast") == DEFAULT_MODEL_TIMEOUT
     assert SLOW_REASONING_MODEL_TIMEOUT > DEFAULT_MODEL_TIMEOUT
 
@@ -465,7 +472,7 @@ class TestEdgeCases:
 
             @property
             def models(self):
-                return type('obj', (object,), {'list': lambda self: EmptyModelsResponse()})()
+                return type('obj', (object,), {'list': lambda self, **kwargs: EmptyModelsResponse()})()
 
         mock_client = MockClient()
         with patch("main.client", mock_client):
@@ -789,3 +796,70 @@ class TestOversizedFailureReasons:
         assert shorten_error("Wrong output: rabbit") == "Wrong output: rabbit"
         long_reason = "x" * (MAX_ERROR_REASON_CHARS + 10)
         assert shorten_error(long_reason).endswith("[+10 chars dropped]")
+
+
+class TestStalledProbesDoNotHangShutdown:
+    """Probes that outlive their asyncio budget must not stall process exit.
+
+    2026-10 incident: three timed-out chat probes stayed parked in their
+    unbounded OpenAI SDK call on asyncio.to_thread's non-daemon executor
+    threads. asyncio.run() then joined those threads for 300 seconds ("The
+    executor did not finishing joining its threads within 300 seconds") and
+    ./run.sh froze right after printing "Failures (3):".
+    """
+
+    def test_probe_work_runs_on_daemon_threads(self):
+        seen = {}
+
+        async def scenario():
+            def probe():
+                seen["daemon"] = threading.current_thread().daemon
+                return "ok"
+            return await to_daemon_thread(probe)
+
+        assert asyncio.run(scenario()) == "ok"
+        assert seen["daemon"] is True
+
+    def test_chat_probe_sets_sdk_timeout_from_the_model_budget(self):
+        client = mock_openai_client()
+        client.chat.completions.create = MagicMock(side_effect=[ChatResponse(), ChatResponse()])
+        with patch("main.client", client):
+            get_llm_response("test message", "alias-fast")
+            get_llm_response("test message", "alias-kimi-k3-1m")
+        first, second = client.chat.completions.create.call_args_list
+        assert first.kwargs["timeout"] == DEFAULT_MODEL_TIMEOUT
+        assert second.kwargs["timeout"] == SLOW_REASONING_MODEL_TIMEOUT
+
+    def test_model_listing_sets_sdk_timeout(self):
+        client = mock_openai_client()
+        client.models.list = MagicMock(return_value=ModelsResponse())
+        with patch("main.client", client):
+            get_available_models()
+        assert client.models.list.call_args.kwargs["timeout"] == DEFAULT_MODEL_TIMEOUT
+
+    def test_embedding_probe_sets_sdk_timeout(self):
+        embedding_client = MockOpenAI("mock_api_key", "mock_base_url")
+        embedding_client.embeddings.create = MagicMock(return_value=EmbeddingResponse())
+        with patch("main.embedding_client", embedding_client):
+            get_embedding_response("potato", "alias-embeddings")
+        assert (
+            embedding_client.embeddings.create.call_args.kwargs["timeout"]
+            == DEFAULT_MODEL_TIMEOUT
+        )
+
+    def test_stalled_probe_does_not_stall_loop_shutdown(self):
+        release = threading.Event()
+
+        def stuck_probe():
+            release.wait(30)
+            return "too late"
+
+        async def scenario():
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(to_daemon_thread(stuck_probe), timeout=0.05)
+
+        started = time.monotonic()
+        asyncio.run(scenario())
+        runtime = time.monotonic() - started
+        release.set()  # let the abandoned daemon thread die quietly
+        assert runtime < 5

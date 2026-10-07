@@ -269,9 +269,9 @@ async def latest_failed_watchdog_models(db_path: str, limit: int) -> set[str]:
 
 
 async def probe_watchdog_model(model: str, timeout: int) -> tuple[bool, str]:
-    from main import ENDPOINTS, check_model, get_all_models_from_endpoints
+    from main import ENDPOINTS, check_model, get_all_models_from_endpoints, to_daemon_thread
 
-    models_with_endpoints = await asyncio.to_thread(get_all_models_from_endpoints)
+    models_with_endpoints = await to_daemon_thread(get_all_models_from_endpoints)
     word = "potato"
     prompt = (
         f"Give me ONLY a word. The word is {word}. Nothing else. "
@@ -288,7 +288,7 @@ async def probe_watchdog_model(model: str, timeout: int) -> tuple[bool, str]:
         endpoint_name = ENDPOINTS[endpoint_id]["name"]
         try:
             ok, response, _ = await asyncio.wait_for(
-                asyncio.to_thread(check_model, model, word, prompt, endpoint_id),
+                to_daemon_thread(check_model, model, word, prompt, endpoint_id),
                 timeout=timeout,
             )
         except asyncio.TimeoutError:

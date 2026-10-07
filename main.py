@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import threading
 import time
 import random
 from datetime import datetime, timezone
@@ -42,6 +43,11 @@ def model_timeout(model: str) -> float:
     normalized = model.lower()
     if "kimi-k3" in normalized or "kimi_k3" in normalized:
         return SLOW_REASONING_MODEL_TIMEOUT
+    if "deepseek-v4.1-flash" in normalized or "deepseek-v41-flash" in normalized:
+        # V4.1 emits a reasoning trace before its final answer.  The health
+        # probe may need its 512-token truncation retry, which can exceed 70s
+        # on the distributed Booster deployment even when it is healthy.
+        return SLOW_REASONING_MODEL_TIMEOUT
     if needs_low_reasoning(model):
         # Thinking models spend tokens before answering; 70s is too tight.
         return SLOW_REASONING_MODEL_TIMEOUT
@@ -52,6 +58,7 @@ def model_timeout(model: str) -> float:
 # "low" reasoning effort instead and let them spend the tokens.
 LOW_REASONING_ONLY = (
     "qwen3.8",       # 2.4T + variants; enable_thinking not supported
+    "qwen 3.8",      # Human-readable served names use a space
     "alias-qwen-trillion",  # alias to the 2.4T
     "alias-qwen-huge",
     "alias-huge",
@@ -158,6 +165,53 @@ def retry_with_exponential_backoff(func):
     
     return wrapper
 
+
+def to_daemon_thread(func, *args):
+    """Run blocking probe work on a daemon thread and await the result.
+
+    asyncio.wait_for() cannot interrupt a thread that is already blocked in
+    a socket read: when the budget expires the thread is simply abandoned.
+    That is safe here only because daemon threads are never joined —
+    asyncio.to_thread() instead parks work on a non-daemon executor thread,
+    and both asyncio.Runner (300 s, "The executor did not finishing joining
+    its threads") and concurrent.futures at interpreter exit join those
+    threads indefinitely. Measured: ./run.sh printed its report and then
+    froze at exit because gateway probes outlived their 70 s budget inside
+    the SDK's own 600 s default timeout.
+    """
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+    name = getattr(func, "__name__", "probe")
+
+    def run() -> None:
+        try:
+            result = func(*args)
+            error = None
+        except BaseException as exception:  # noqa: BLE001 - delivered to the awaiter
+            result, error = None, exception
+
+        def deliver() -> None:
+            if future.done():
+                # Ancestor await was abandoned by wait_for(); the probe
+                # result is obsolete and nobody will read it.
+                return
+            if error is not None:
+                future.set_exception(error)
+            else:
+                future.set_result(result)
+
+        try:
+            loop.call_soon_threadsafe(deliver)
+        except RuntimeError:
+            pass  # event loop already closed; nobody is waiting
+
+    threading.Thread(
+        target=run,
+        name=f"to-daemon-thread-{name}",
+        daemon=True,
+    ).start()
+    return future
+
 # Multi-endpoint support
 def get_endpoints() -> List[Dict]:
     """Parse multiple endpoints from environment variables."""
@@ -229,13 +283,13 @@ _registry_embedding_client = embedding_client
 def get_available_models() -> List[str]:
     """Compatibility wrapper for the original single-endpoint API."""
     if client is not None and client is not _registry_client:
-        models = client.models.list()
+        models = client.models.list(timeout=DEFAULT_MODEL_TIMEOUT)
         return [model.id for model in models.data]
     if ENDPOINTS:
         return [model for model, _endpoint_id in get_all_models_from_endpoints()]
     if client is None:
         return []
-    models = client.models.list()
+    models = client.models.list(timeout=DEFAULT_MODEL_TIMEOUT)
     return [model.id for model in models.data]
 
 
@@ -332,7 +386,7 @@ def get_all_models_from_endpoints() -> List[Tuple[str, int]]:
             client = ep["client"]
             base_url = ep["base_url"]
             print(f"DEBUG: Fetching models from {ep['name']} ({base_url})...", flush=True)
-            models = client.models.list()
+            models = client.models.list(timeout=DEFAULT_MODEL_TIMEOUT)
             model_list = [model.id for model in models.data]
             metadata = {}
             for model in models.data:
@@ -543,6 +597,10 @@ def get_llm_response(prompt, model, endpoint_id: int = 0):
                 "stream_options": {"include_usage": True},
                 "presence_penalty": 1.5,
                 "frequency_penalty": 0,
+                # Bounds the socket per request. A wedged gateway kept this
+                # thread alive long after its asyncio budget was abandoned,
+                # and shutdown joined it forever.
+                "timeout": model_timeout(model),
             }
             if needs_low_reasoning(model):
                 # Must be checked BEFORE supports_thinking_toggle: names like
@@ -614,6 +672,7 @@ def get_embedding_response(text, model, endpoint_id: int = 0):
         response = embedding_client.embeddings.create(
             model=model,
             input=text,
+            timeout=model_timeout(model),
         )
         if response and hasattr(response, "data") and response.data:
             embedding = getattr(response.data[0], "embedding", None)
@@ -992,7 +1051,7 @@ class WatchdogApp(App):
     async def load_models(self):
         if self.status_line:
             self.status_line.update("Loading models...")
-        discovered_models = await asyncio.to_thread(get_all_models_from_endpoints)
+        discovered_models = await to_daemon_thread(get_all_models_from_endpoints)
         self.previous_models = load_model_state()
         if discovered_models:
             save_model_state(discovered_models)
@@ -1048,7 +1107,7 @@ class WatchdogApp(App):
             timeout = model_timeout(model)
             try:
                 ok, response, tokens_used = await asyncio.wait_for(
-                    asyncio.to_thread(check_model, model, word, prompt, endpoint_id),
+                    to_daemon_thread(check_model, model, word, prompt, endpoint_id),
                     timeout=timeout,
                 )
             except asyncio.TimeoutError:
@@ -1132,7 +1191,7 @@ async def run_quiet():
         f"Give me ONLY a word. The word is {word}. Nothing else. "
         "No sentences, no explanations, no definitions. Just the word."
     )
-    discovered_models = await asyncio.to_thread(get_all_models_from_endpoints)
+    discovered_models = await to_daemon_thread(get_all_models_from_endpoints)
     previous_models = load_model_state()
     if discovered_models:
         save_model_state(discovered_models)
@@ -1153,7 +1212,7 @@ async def run_quiet():
         endpoint_name = ENDPOINTS[endpoint_id]["name"] if endpoint_id < len(ENDPOINTS) else f"Endpoint-{endpoint_id}"
         try:
             ok, response, tokens_used = await asyncio.wait_for(
-                asyncio.to_thread(check_model, model, word, prompt, endpoint_id),
+                to_daemon_thread(check_model, model, word, prompt, endpoint_id),
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
