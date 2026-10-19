@@ -823,24 +823,47 @@ def decision_endpoint():
 
 
 class TestDecisionModels:
-    """alias-clef 404s on chat, completions, responses and messages; the
-    catalog advertises decision_endpoint /v1/systemone instead. The probe
-    calls that route and names it when the gateway does not serve it."""
+    """alias-clef 404s on chat; the catalog advertises decision_endpoint
+    /v1/systemone, which takes typed questions ("choice" needs a criteria
+    object) instead of a prompt. A 200 is not enough: the probe must pick
+    potato over quark."""
 
     def test_clef_is_detected_from_its_advertised_route(self):
         with patch("main.ENDPOINTS", [decision_endpoint()]):
             assert detect_model_type("alias-clef", 0) == "decision"
 
-    def test_clef_is_probed_on_its_decision_route(self):
+    @staticmethod
+    def decided(choice):
         answered = MagicMock(status_code=200, is_success=True)
+        answered.json.return_value = {
+            "model": "alias-clef",
+            "answers": {"word": {"type": "choice", "choice": choice, "confidence": 0.9925}},
+        }
+        return answered
+
+    def test_clef_is_asked_a_choice_question_on_its_decision_route(self):
         with patch("main.ENDPOINTS", [decision_endpoint()]), patch(
-            "main.httpx.post", return_value=answered
+            "main.httpx.post", return_value=self.decided("potato")
         ) as post:
             ok, response, _ = check_model("alias-clef", "potato", "prompt", 0)
 
         assert ok is True
-        assert response == "decision endpoint answered via /v1/systemone"
+        assert response == "decision: potato (confidence 0.9925)"
         assert post.call_args.args[0] == "https://gateway.example/v1/systemone"
+        payload = post.call_args.kwargs["json"]
+        assert payload["state"] == {"text": "The word is potato."}
+        question = payload["questions"]["word"]
+        assert question["type"] == "choice"
+        assert set(question["criteria"]) == {"potato", "quark"}
+
+    def test_wrong_choice_fails_even_with_a_200(self):
+        with patch("main.ENDPOINTS", [decision_endpoint()]), patch(
+            "main.httpx.post", return_value=self.decided("quark")
+        ):
+            ok, response, _ = check_model("alias-clef", "potato", "prompt", 0)
+
+        assert ok is False
+        assert response == "Wrong decision: decision: quark (confidence 0.9925)"
 
     def test_unserved_decision_route_is_reported_by_name(self):
         missing = MagicMock(status_code=404, is_success=False, text="Not Found")

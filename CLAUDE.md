@@ -57,7 +57,7 @@ dispatches. Never send the potato chat prompt to a non-chat model.
 | `chat` | everything else | `/v1/chat/completions`, "the word is potato" |
 | `embedding` | `embedding` in name, or `EMBEDDING_MODELS` | `embeddings.create` must return a vector |
 | `rerank` | `rerank` in name | `POST /v1/rerank` (`get_rerank_response`) |
-| `decision` | metadata `decision_endpoint` or `capabilities: ["systemone"]` (`alias-clef`) | `POST` the advertised route; 404 → `Advertised route … is not served` |
+| `decision` | metadata `decision_endpoint` or `capabilities: ["systemone"]` (`alias-clef`) | `POST` the advertised route with a `choice` question (`state` + `questions`, criteria potato/quark); must pick `potato`, else `Wrong decision:` |
 | `speech` | `voice` / `drama` in name, `task_type` text-to-speech (`alias-voice-drama3`) | `POST /v1/audio/speech` with `input: "potato"`, body must start with an audio magic number |
 | `audio` | `whisper`, `task_type` transcription/speech-to-text | `POST /v1/audio/transcriptions` with `sample.wav` |
 | `video` | `task_type` ti2v/t2v/video, `minimax-h3` | `POST /videos` — missing-prompt validation counts as healthy |
@@ -77,10 +77,11 @@ Alex asked for them to be really tested and the cost is small (measured
 ~2 KB per image at 50x50, 90 KB per voice clip). Probes return only the byte count — never the payload.
 Image models are no longer skipped in the UI/report.
 
-`alias-clef` 404s on chat, completions, responses and messages, and its
-advertised `/v1/systemone` is not in the gateway's `openapi.json` either, so the
-`decision` probe currently fails by design; it turns green once the gateway
-serves that route. `alias-video` is still detected as `chat` (its metadata only
+`alias-clef` 404s on chat and only answers its advertised `/v1/systemone`
+(not listed in `openapi.json`). That route takes no prompt: it rejects anything
+without `state` and a non-empty `questions` object whose entries are typed
+`choice` (needs a `criteria` object), `noul` or `score` (needs a `criteria`
+list). Measured 2026-10-19: potato chosen at 0.96–0.99 confidence in <1s. `alias-video` is still detected as `chat` (its metadata only
 has `modalities.output: ["video"]`) and the gateway answers it with
 `Use POST /v1/videos/sync for alias-video` — not yet handled.
 

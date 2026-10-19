@@ -782,7 +782,14 @@ def get_video_response(model: str, endpoint_id: int = 0):
 
 IMAGE_PROMPT = "a potato"
 SPEECH_INPUT = "potato"
-DECISION_INPUT = "Give me ONLY a word. The word is potato. Nothing else."
+# systemone takes typed questions, not a prompt: a "choice" question needs a
+# criteria object, and only "potato" is right for this state.
+DECISION_STATE = "The word is potato."
+DECISION_QUESTION = {
+    "type": "choice",
+    "question": "Which word does the text say?",
+    "criteria": {"potato": "the word potato", "quark": "the word quark"},
+}
 # Magic numbers of the formats the generators return; a 200 with anything else
 # (an error page, an empty string) is not a rendered image or a voice clip.
 IMAGE_SIGNATURES = (b"\x89PNG", b"\xff\xd8\xff", b"RIFF", b"GIF8")
@@ -843,7 +850,7 @@ def get_speech_response(model: str, endpoint_id: int = 0):
 
 @retry_with_exponential_backoff
 def get_decision_response(model: str, endpoint_id: int = 0):
-    """Call the decision route the catalog advertises for the model."""
+    """Ask the advertised decision route a two-way choice with one right answer."""
     try:
         base_url, headers = _endpoint_request_config(endpoint_id)
         route = model_metadata(model, endpoint_id).get("decision_endpoint") or "/v1/systemone"
@@ -852,13 +859,23 @@ def get_decision_response(model: str, endpoint_id: int = 0):
         response = httpx.post(
             f"{root}/{route.lstrip('/')}",
             headers={**headers, "Content-Type": "application/json"},
-            json={"model": model, "input": DECISION_INPUT},
+            json={
+                "model": model,
+                "state": {"text": DECISION_STATE},
+                "questions": {"word": DECISION_QUESTION},
+            },
             timeout=60.0,
         )
         if response.status_code == 404:
             return f"An error occurred: Advertised route {route} is not served (404)", None
         response.raise_for_status()
-        return f"decision endpoint answered via {route}", None
+        answer = (response.json().get("answers") or {}).get("word")
+        if not isinstance(answer, dict) or "choice" not in answer:
+            return "An error occurred: Invalid decision response", None
+        summary = f"decision: {answer['choice']} (confidence {answer.get('confidence')})"
+        if answer["choice"] == "potato":
+            return summary, None
+        return f"Wrong decision: {summary}", None
     except Exception as error:
         return f"An error occurred: {error}", None
 
@@ -970,7 +987,11 @@ def _probe_model(model, word, prompt, endpoint_id: int = 0):
 
     if model_type == "decision":
         response, tokens_used = get_decision_response(model, endpoint_id)
-        return not response.startswith("An error occurred:"), response, tokens_used
+        return (
+            not response.startswith(("An error occurred:", "Wrong decision:")),
+            response,
+            tokens_used,
+        )
 
     response, tokens_used = get_llm_response(prompt, model, endpoint_id)
     if response == "An error occurred: Empty response content from LLM":
