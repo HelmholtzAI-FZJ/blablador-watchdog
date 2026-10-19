@@ -801,7 +801,7 @@ def get_image_response(model: str, endpoint_id: int = 0):
                 "model": model,
                 "prompt": IMAGE_PROMPT,
                 "n": 1,
-                "size": "256x256",
+                "size": "50x50",
                 "num_inference_steps": 4,
                 "response_format": "b64_json",
             },

@@ -61,7 +61,7 @@ dispatches. Never send the potato chat prompt to a non-chat model.
 | `speech` | `voice` / `drama` in name, `task_type` text-to-speech (`alias-voice-drama3`) | `POST /v1/audio/speech` with `input: "potato"`, body must start with an audio magic number |
 | `audio` | `whisper`, `task_type` transcription/speech-to-text | `POST /v1/audio/transcriptions` with `sample.wav` |
 | `video` | `task_type` ti2v/t2v/video, `minimax-h3` | `POST /videos` — missing-prompt validation counts as healthy |
-| `image` | `qwen-image`, `flux`, `alias-image`, `task_type`/pipeline image | `POST /v1/images/generations`: one real 256x256, 4-step render of "a potato"; decoded `b64_json` must be PNG/JPEG/WebP/GIF |
+| `image` | `qwen-image`, `flux`, `alias-image`, `task_type`/pipeline image | `POST /v1/images/generations`: one real 50x50, 4-step render (alias-image snaps it to 32x32) of "a potato"; decoded `b64_json` must be PNG/JPEG/WebP/GIF |
 
 Evidence for the rerank route on `api.blablador.fz-juelich.de`
 (`alias-qwen3-{4b,8b}-reranking`): chat completions → 404, embeddings → 500,
@@ -74,7 +74,7 @@ Video stays a route-validation probe (missing-prompt 400 counts as healthy) and
 must not start a generation job. Image and speech models *do* generate, because
 Alex asked for them to be really tested and the cost is small (measured
 2026-10-19: alias-flux2 1.0s, alias-image 15.3s, alias-voice-drama3 4.2s,
-40–130 KB per payload). Probes return only the byte count — never the payload.
+~2 KB per image at 50x50, 90 KB per voice clip). Probes return only the byte count — never the payload.
 Image models are no longer skipped in the UI/report.
 
 `alias-clef` 404s on chat, completions, responses and messages, and its

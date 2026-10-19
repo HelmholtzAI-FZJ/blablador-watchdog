@@ -759,7 +759,7 @@ class TestImageGeneratorModels:
         assert post.call_args.args[0].endswith("/images/generations")
         payload = post.call_args.kwargs["json"]
         assert payload["prompt"] == "a potato"
-        assert payload["size"] == "256x256"
+        assert payload["size"] == "50x50"
         assert payload["response_format"] == "b64_json"
 
     def test_image_route_answering_without_image_bytes_fails(self):
