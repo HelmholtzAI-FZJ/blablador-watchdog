@@ -57,9 +57,11 @@ dispatches. Never send the potato chat prompt to a non-chat model.
 | `chat` | everything else | `/v1/chat/completions`, "the word is potato" |
 | `embedding` | `embedding` in name, or `EMBEDDING_MODELS` | `embeddings.create` must return a vector |
 | `rerank` | `rerank` in name | `POST /v1/rerank` (`get_rerank_response`) |
+| `decision` | metadata `decision_endpoint` or `capabilities: ["systemone"]` (`alias-clef`) | `POST` the advertised route; 404 → `Advertised route … is not served` |
+| `speech` | `voice` / `drama` in name, `task_type` text-to-speech (`alias-voice-drama3`) | `POST /v1/audio/speech` with `input: "potato"`, body must start with an audio magic number |
 | `audio` | `whisper`, `task_type` transcription/speech-to-text | `POST /v1/audio/transcriptions` with `sample.wav` |
 | `video` | `task_type` ti2v/t2v/video, `minimax-h3` | `POST /videos` — missing-prompt validation counts as healthy |
-| `image` | `qwen-image`, `flux`, `alias-image`, `task_type`/pipeline image | `POST /v1/images/generations`, same validation trick; skipped entirely in the UI/report |
+| `image` | `qwen-image`, `flux`, `alias-image`, `task_type`/pipeline image | `POST /v1/images/generations`: one real 256x256, 4-step render of "a potato"; decoded `b64_json` must be PNG/JPEG/WebP/GIF |
 
 Evidence for the rerank route on `api.blablador.fz-juelich.de`
 (`alias-qwen3-{4b,8b}-reranking`): chat completions → 404, embeddings → 500,
@@ -68,8 +70,19 @@ string, so it cannot rank a document list.
 
 A 200 is not proof of health for reranking: the probe asserts the potato
 document outranks an unrelated one and reports `Wrong ranking:` otherwise.
-Route-validation probes (audio/video/image) intentionally do not start
-expensive generation jobs — keep it that way.
+Video stays a route-validation probe (missing-prompt 400 counts as healthy) and
+must not start a generation job. Image and speech models *do* generate, because
+Alex asked for them to be really tested and the cost is small (measured
+2026-10-19: alias-flux2 1.0s, alias-image 15.3s, alias-voice-drama3 4.2s,
+40–130 KB per payload). Probes return only the byte count — never the payload.
+Image models are no longer skipped in the UI/report.
+
+`alias-clef` 404s on chat, completions, responses and messages, and its
+advertised `/v1/systemone` is not in the gateway's `openapi.json` either, so the
+`decision` probe currently fails by design; it turns green once the gateway
+serves that route. `alias-video` is still detected as `chat` (its metadata only
+has `modalities.output: ["video"]`) and the gateway answers it with
+`Use POST /v1/videos/sync for alias-video` — not yet handled.
 
 Image models must be detected by name, because the gateway cannot tell us:
 `api.blablador.fz-juelich.de` returns no `task_type` or `pipeline_*` metadata,

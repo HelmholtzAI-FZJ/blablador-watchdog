@@ -1,5 +1,6 @@
 from unittest.mock import patch, MagicMock
 import asyncio
+import base64
 import threading
 import time
 import pytest
@@ -741,21 +742,117 @@ class TestImageGeneratorModels:
             assert detect_model_type("alias-image", 0) == "image"
             assert detect_model_type("alias-fast", 0) == "chat"
 
-    def test_flux_alias_is_probed_on_the_image_route_not_chat(self):
-        validation = MagicMock(
-            status_code=400, is_success=False, text="prompt field required"
-        )
+    def test_flux_alias_renders_a_real_image_on_the_image_route(self):
+        rendered = MagicMock(status_code=200, is_success=True)
+        rendered.json.return_value = {
+            "data": [{"b64_json": base64.b64encode(b"\x89PNG" + b"0" * 60).decode()}]
+        }
         with patch("main.ENDPOINTS", [rerank_endpoint()]), patch(
-            "main.httpx.post", return_value=validation
+            "main.httpx.post", return_value=rendered
         ) as post:
             ok, response, _ = check_model(
                 "alias-flux2", "potato", "Give me ONLY a word.", 0
             )
 
         assert ok is True
-        assert response == "image endpoint healthy (prompt validation passed)"
-        assert isinstance(response, str)
+        assert response == "image rendered (64 bytes)"
         assert post.call_args.args[0].endswith("/images/generations")
+        payload = post.call_args.kwargs["json"]
+        assert payload["prompt"] == "a potato"
+        assert payload["size"] == "256x256"
+        assert payload["response_format"] == "b64_json"
+
+    def test_image_route_answering_without_image_bytes_fails(self):
+        not_an_image = MagicMock(status_code=200, is_success=True)
+        not_an_image.json.return_value = {
+            "data": [{"b64_json": base64.b64encode(b"<html>oops</html>").decode()}]
+        }
+        with patch("main.ENDPOINTS", [rerank_endpoint()]), patch(
+            "main.httpx.post", return_value=not_an_image
+        ):
+            ok, response, _ = check_model("alias-image", "potato", "prompt", 0)
+
+        assert ok is False
+        assert response == "An error occurred: Image response is not an image"
+
+
+class TestVoiceModels:
+    """alias-voice-drama3 is a TTS model: the chat probe cannot exercise it,
+    /audio/speech with a one-word input renders a ~74 KB WAV."""
+
+    def test_voice_models_are_detected_as_speech(self):
+        with patch("main.ENDPOINTS", [rerank_endpoint()]):
+            assert detect_model_type("alias-voice-drama3", 0) == "speech"
+            assert detect_model_type("faster-whisper-large-v3", 0) == "audio"
+
+    def test_voice_model_synthesises_on_the_speech_route(self):
+        wav = MagicMock(status_code=200, is_success=True, content=b"RIFF" + b"0" * 96)
+        with patch("main.ENDPOINTS", [rerank_endpoint()]), patch(
+            "main.httpx.post", return_value=wav
+        ) as post:
+            ok, response, _ = check_model("alias-voice-drama3", "potato", "prompt", 0)
+
+        assert ok is True
+        assert response == "speech synthesised (100 bytes)"
+        assert post.call_args.args[0] == "https://gateway.example/v1/audio/speech"
+        assert post.call_args.kwargs["json"] == {
+            "model": "alias-voice-drama3",
+            "input": "potato",
+        }
+
+    def test_speech_route_returning_json_is_not_audio(self):
+        json_body = MagicMock(status_code=200, is_success=True, content=b'{"error":1}')
+        with patch("main.ENDPOINTS", [rerank_endpoint()]), patch(
+            "main.httpx.post", return_value=json_body
+        ):
+            ok, response, _ = check_model("alias-voice-drama3", "potato", "prompt", 0)
+
+        assert ok is False
+        assert response == "An error occurred: Speech response is not audio"
+
+
+def decision_endpoint():
+    endpoint = rerank_endpoint()
+    endpoint["model_metadata"] = {
+        "alias-clef": {
+            "capabilities": ["systemone"],
+            "decision_endpoint": "/v1/systemone",
+        }
+    }
+    return endpoint
+
+
+class TestDecisionModels:
+    """alias-clef 404s on chat, completions, responses and messages; the
+    catalog advertises decision_endpoint /v1/systemone instead. The probe
+    calls that route and names it when the gateway does not serve it."""
+
+    def test_clef_is_detected_from_its_advertised_route(self):
+        with patch("main.ENDPOINTS", [decision_endpoint()]):
+            assert detect_model_type("alias-clef", 0) == "decision"
+
+    def test_clef_is_probed_on_its_decision_route(self):
+        answered = MagicMock(status_code=200, is_success=True)
+        with patch("main.ENDPOINTS", [decision_endpoint()]), patch(
+            "main.httpx.post", return_value=answered
+        ) as post:
+            ok, response, _ = check_model("alias-clef", "potato", "prompt", 0)
+
+        assert ok is True
+        assert response == "decision endpoint answered via /v1/systemone"
+        assert post.call_args.args[0] == "https://gateway.example/v1/systemone"
+
+    def test_unserved_decision_route_is_reported_by_name(self):
+        missing = MagicMock(status_code=404, is_success=False, text="Not Found")
+        with patch("main.ENDPOINTS", [decision_endpoint()]), patch(
+            "main.httpx.post", return_value=missing
+        ):
+            ok, response, _ = check_model("alias-clef", "potato", "prompt", 0)
+
+        assert ok is False
+        assert response == (
+            "An error occurred: Advertised route /v1/systemone is not served (404)"
+        )
 
 
 class TestOversizedFailureReasons:
@@ -863,3 +960,4 @@ class TestStalledProbesDoNotHangShutdown:
         runtime = time.monotonic() - started
         release.set()  # let the abandoned daemon thread die quietly
         assert runtime < 5
+

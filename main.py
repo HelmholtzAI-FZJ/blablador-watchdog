@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import os
 import threading
@@ -344,6 +345,19 @@ def detect_model_type(model: str, endpoint_id: int = 0) -> str:
         return "embedding"
     if is_reranking_model(model):
         return "rerank"
+    # alias-clef answers no chat route; the catalog only advertises its own
+    # decision route (capabilities ["systemone"], decision_endpoint).
+    capabilities = [str(c).lower() for c in metadata.get("capabilities") or []]
+    if metadata.get("decision_endpoint") or "systemone" in capabilities:
+        return "decision"
+    # Voice models (alias-voice-drama3) synthesise on /audio/speech; the gateway
+    # gives no task_type for them, so the name is all we have.
+    if (
+        "voice" in model_lower
+        or "drama" in model_lower
+        or "text-to-speech" in task_type
+    ):
+        return "speech"
     if (
         "qwen-image" in model_lower
         or model_lower == "alias-image"
@@ -766,24 +780,85 @@ def get_video_response(model: str, endpoint_id: int = 0):
         return f"An error occurred: {error}", None
 
 
+IMAGE_PROMPT = "a potato"
+SPEECH_INPUT = "potato"
+DECISION_INPUT = "Give me ONLY a word. The word is potato. Nothing else."
+# Magic numbers of the formats the generators return; a 200 with anything else
+# (an error page, an empty string) is not a rendered image or a voice clip.
+IMAGE_SIGNATURES = (b"\x89PNG", b"\xff\xd8\xff", b"RIFF", b"GIF8")
+AUDIO_SIGNATURES = (b"RIFF", b"ID3", b"\xff\xfb", b"\xff\xf3", b"OggS", b"fLaC")
+
+
 @retry_with_exponential_backoff
 def get_image_response(model: str, endpoint_id: int = 0):
-    """Probe the image route without starting an expensive generation job."""
+    """Render one small image and check that real image bytes come back."""
     try:
         base_url, headers = _endpoint_request_config(endpoint_id)
         response = httpx.post(
             f"{base_url}/images/generations",
             headers={**headers, "Content-Type": "application/json"},
-            json={"model": model},
-            timeout=20.0,
+            json={
+                "model": model,
+                "prompt": IMAGE_PROMPT,
+                "n": 1,
+                "size": "256x256",
+                "num_inference_steps": 4,
+                "response_format": "b64_json",
+            },
+            timeout=120.0,
         )
-        if response.is_success:
-            return "image endpoint accepted request", None
-        body = response.text.lower()
-        if response.status_code in (400, 422) and "prompt" in body:
-            return "image endpoint healthy (prompt validation passed)", None
         response.raise_for_status()
-        return "An error occurred: Invalid image response", None
+        data = response.json().get("data") or []
+        encoded = data[0].get("b64_json") if data and isinstance(data[0], dict) else None
+        if not isinstance(encoded, str) or not encoded:
+            return "An error occurred: Image response carries no b64_json", None
+        image = base64.b64decode(encoded)
+        if not image.startswith(IMAGE_SIGNATURES):
+            return "An error occurred: Image response is not an image", None
+        # Never return the payload itself: it would land in the report and DB.
+        return f"image rendered ({len(image)} bytes)", None
+    except Exception as error:
+        return f"An error occurred: {error}", None
+
+
+@retry_with_exponential_backoff
+def get_speech_response(model: str, endpoint_id: int = 0):
+    """Synthesise one word on /audio/speech and check that audio comes back."""
+    try:
+        base_url, headers = _endpoint_request_config(endpoint_id)
+        response = httpx.post(
+            f"{base_url}/audio/speech",
+            headers={**headers, "Content-Type": "application/json"},
+            json={"model": model, "input": SPEECH_INPUT},
+            timeout=60.0,
+        )
+        response.raise_for_status()
+        audio = response.content
+        if not audio.startswith(AUDIO_SIGNATURES):
+            return "An error occurred: Speech response is not audio", None
+        return f"speech synthesised ({len(audio)} bytes)", None
+    except Exception as error:
+        return f"An error occurred: {error}", None
+
+
+@retry_with_exponential_backoff
+def get_decision_response(model: str, endpoint_id: int = 0):
+    """Call the decision route the catalog advertises for the model."""
+    try:
+        base_url, headers = _endpoint_request_config(endpoint_id)
+        route = model_metadata(model, endpoint_id).get("decision_endpoint") or "/v1/systemone"
+        # base_url already ends in /v1; the advertised route is root-relative.
+        root = base_url[: -len("/v1")] if base_url.endswith("/v1") else base_url
+        response = httpx.post(
+            f"{root}/{route.lstrip('/')}",
+            headers={**headers, "Content-Type": "application/json"},
+            json={"model": model, "input": DECISION_INPUT},
+            timeout=60.0,
+        )
+        if response.status_code == 404:
+            return f"An error occurred: Advertised route {route} is not served (404)", None
+        response.raise_for_status()
+        return f"decision endpoint answered via {route}", None
     except Exception as error:
         return f"An error occurred: {error}", None
 
@@ -887,6 +962,14 @@ def _probe_model(model, word, prompt, endpoint_id: int = 0):
 
     if model_type == "image":
         response, tokens_used = get_image_response(model, endpoint_id)
+        return not response.startswith("An error occurred:"), response, tokens_used
+
+    if model_type == "speech":
+        response, tokens_used = get_speech_response(model, endpoint_id)
+        return not response.startswith("An error occurred:"), response, tokens_used
+
+    if model_type == "decision":
+        response, tokens_used = get_decision_response(model, endpoint_id)
         return not response.startswith("An error occurred:"), response, tokens_used
 
     response, tokens_used = get_llm_response(prompt, model, endpoint_id)
@@ -1056,11 +1139,7 @@ class WatchdogApp(App):
         if discovered_models:
             save_model_state(discovered_models)
         self.current_models = model_tags(discovered_models)
-        # Skip image models entirely: not LLMs, chat probes just time out.
-        models_with_endpoints = [
-            (m, e) for m, e in discovered_models
-            if detect_model_type(m, e) != "image"
-        ]
+        models_with_endpoints = list(discovered_models)
         self.models_with_endpoints = models_with_endpoints
         self.model_widgets = {}
 
@@ -1196,11 +1275,7 @@ async def run_quiet():
     if discovered_models:
         save_model_state(discovered_models)
     current_models = model_tags(discovered_models)
-    # Skip image models entirely: not LLMs, chat probes just time out.
-    models_with_endpoints = [
-        (m, e) for m, e in discovered_models
-        if detect_model_type(m, e) != "image"
-    ]
+    models_with_endpoints = list(discovered_models)
     if not models_with_endpoints:
         print("No models available.")
         print("\n".join(model_list_change_report(previous_models, current_models)))
