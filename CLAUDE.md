@@ -57,10 +57,10 @@ dispatches. Never send the potato chat prompt to a non-chat model.
 | `chat` | everything else | `/v1/chat/completions`, "the word is potato" |
 | `embedding` | `embedding` in name, or `EMBEDDING_MODELS` | `embeddings.create` must return a vector |
 | `rerank` | `rerank` in name | `POST /v1/rerank` (`get_rerank_response`) |
-| `decision` | metadata `decision_endpoint` or `capabilities: ["systemone"]` (`alias-clef`) | `POST` the advertised route with a `choice` question (`state` + `questions`, criteria potato/quark); must pick `potato`, else `Wrong decision:` |
+| `decision` | metadata `decision_endpoint` or `capabilities: ["systemone"]`, or `clef` in name (`alias-clef`) | `POST` the advertised route with a `choice` question (`state` + `questions`, criteria potato/quark); must pick `potato`, else `Wrong decision:` |
 | `speech` | `voice` / `drama` in name, `task_type` text-to-speech (`alias-voice-drama3`) | `POST /v1/audio/speech` with `input: "potato"`, body must start with an audio magic number |
 | `audio` | `whisper`, `task_type` transcription/speech-to-text | `POST /v1/audio/transcriptions` with `sample.wav` |
-| `video` | `task_type` ti2v/t2v/video, `minimax-h3` | `POST /videos` — missing-prompt validation counts as healthy |
+| `video` | `task_type` ti2v/t2v/video, `modalities.output` video, `minimax-h3`, `alias-video` | `POST /videos` JSON; on 404 `POST /videos/sync` multipart with only `model` — missing-prompt validation counts as healthy |
 | `image` | `qwen-image`, `flux`, `alias-image`, `task_type`/pipeline image | `POST /v1/images/generations`: one real 50x50, 4-step render (alias-image snaps it to 32x32) of "a potato"; decoded `b64_json` must be PNG/JPEG/WebP/GIF |
 
 Evidence for the rerank route on `api.blablador.fz-juelich.de`
@@ -78,12 +78,15 @@ Alex asked for them to be really tested and the cost is small (measured
 Image models are no longer skipped in the UI/report.
 
 `alias-clef` 404s on chat and only answers its advertised `/v1/systemone`
-(not listed in `openapi.json`). That route takes no prompt: it rejects anything
+(listed in `openapi.json` since 2026-10). That route takes no prompt: it rejects anything
 without `state` and a non-empty `questions` object whose entries are typed
 `choice` (needs a `criteria` object), `noul` or `score` (needs a `criteria`
-list). Measured 2026-10-19: potato chosen at 0.96–0.99 confidence in <1s. `alias-video` is still detected as `chat` (its metadata only
-has `modalities.output: ["video"]`) and the gateway answers it with
-`Use POST /v1/videos/sync for alias-video` — not yet handled.
+list). Measured 2026-10-19: potato chosen at 0.96–0.99 confidence in <1s. Measured 2026-10-21: the gateway served both `alias-clef` and `alias-video`
+with **no metadata**, so both fell to the chat probe (clef → 404, video →
+`Use POST /v1/videos/sync for alias-video`). Detection therefore falls back to
+the name. `alias-video` 404s on `/v1/videos`; `/v1/videos/sync` takes
+multipart form data and a model-only form returns `400 prompt is required`
+from the backend (~3s) — never send a prompt there, it renders synchronously.
 
 Image models must be detected by name, because the gateway cannot tell us:
 `api.blablador.fz-juelich.de` returns no `task_type` or `pipeline_*` metadata,

@@ -331,6 +331,13 @@ def model_metadata(model: str, endpoint_id: int = 0) -> Dict:
     return ENDPOINTS[endpoint_id].get("model_metadata", {}).get(model, {})
 
 
+def output_modalities(metadata: Dict) -> List:
+    modalities = metadata.get("modalities")
+    if isinstance(modalities, dict):
+        return modalities.get("output") or []
+    return []
+
+
 def detect_model_type(model: str, endpoint_id: int = 0) -> str:
     """Return the API capability to probe for a discovered model."""
     metadata = model_metadata(model, endpoint_id)
@@ -347,8 +354,14 @@ def detect_model_type(model: str, endpoint_id: int = 0) -> str:
         return "rerank"
     # alias-clef answers no chat route; the catalog only advertises its own
     # decision route (capabilities ["systemone"], decision_endpoint).
+    # The gateway sometimes serves the catalog without that metadata, so the
+    # name is the fallback.
     capabilities = [str(c).lower() for c in metadata.get("capabilities") or []]
-    if metadata.get("decision_endpoint") or "systemone" in capabilities:
+    if (
+        metadata.get("decision_endpoint")
+        or "systemone" in capabilities
+        or "clef" in model_lower
+    ):
         return "decision"
     # Voice models (alias-voice-drama3) synthesise on /audio/speech; the gateway
     # gives no task_type for them, so the name is all we have.
@@ -378,6 +391,8 @@ def detect_model_type(model: str, endpoint_id: int = 0) -> str:
         any(marker in task_type for marker in ("ti2v", "t2v", "video"))
         or "video" in pipeline
         or "minimax-h3" in model_lower
+        or model_lower == "alias-video"
+        or "video" in [str(m).lower() for m in output_modalities(metadata)]
     ):
         return "video"
     if "image" in task_type or "image" in pipeline:
@@ -760,6 +775,16 @@ def get_video_response(model: str, endpoint_id: int = 0):
                 json={"model": model},
                 timeout=20.0,
             )
+            if response.status_code == 404 or "/videos/sync" in response.text:
+                # alias-video only answers the synchronous route, which takes
+                # multipart form data; a model-only form gets the backend's
+                # "prompt is required" without rendering anything.
+                response = httpx.post(
+                    f"{base_url}/videos/sync",
+                    headers=headers,
+                    files={"model": (None, model)},
+                    timeout=20.0,
+                )
             last_response = response
             endpoint_name = ENDPOINTS[candidate_id].get("name", f"Endpoint-{candidate_id + 1}")
             if response.is_success:

@@ -206,12 +206,13 @@ def test_video_probe_falls_back_from_catalog_gateway():
         text="prompt field required",
     )
     with patch("main.ENDPOINTS", endpoints), patch(
-        "main.httpx.post", side_effect=[not_found, validation]
+        "main.httpx.post", side_effect=[not_found, not_found, validation]
     ) as post:
         response, _ = get_video_response("MiniMax-h3", 0)
 
     assert response == "video endpoint healthy via Endpoint-2"
-    assert post.call_count == 2
+    # /videos and /videos/sync both 404 on Endpoint-1 before falling through.
+    assert post.call_count == 3
 
 
 # Mocking OpenAI client for tests
@@ -984,3 +985,40 @@ class TestStalledProbesDoNotHangShutdown:
         release.set()  # let the abandoned daemon thread die quietly
         assert runtime < 5
 
+
+class TestMetadataLessSpecialModels:
+    """The gateway (2026-10-21) serves alias-clef and alias-video with no
+    metadata at all, so both fell through to the potato chat prompt: clef
+    404s there, and video answers "Use POST /v1/videos/sync for alias-video".
+    /v1/videos 404s for alias-video; the sync route takes multipart form data
+    and a model-only form gets the backend's "prompt is required" — routing
+    proven without rendering a video."""
+
+    endpoints = [{"name": "Endpoint-1", "base_url": "https://gw.example/v1", "api_key": "k"}]
+
+    def test_detected_by_name_without_metadata(self):
+        with patch("main.ENDPOINTS", self.endpoints):
+            assert detect_model_type("alias-clef", 0) == "decision"
+            assert detect_model_type("alias-video", 0) == "video"
+
+    def test_video_output_modality_is_a_video_model(self):
+        endpoints = [{**self.endpoints[0], "model_metadata": {
+            "new-clip": {"modalities": {"output": ["video"]}}}}]
+        with patch("main.ENDPOINTS", endpoints):
+            assert detect_model_type("new-clip", 0) == "video"
+
+    def test_alias_video_is_validated_on_the_sync_route(self):
+        not_found = MagicMock(status_code=404, is_success=False, text='{"detail":"Not Found"}')
+        validation = MagicMock(
+            status_code=400, is_success=False, text='{"detail":"prompt is required"}'
+        )
+        with patch("main.ENDPOINTS", self.endpoints), patch(
+            "main.httpx.post", side_effect=[not_found, validation]
+        ) as post:
+            ok, response, _ = check_model("alias-video", "potato", "prompt", 0)
+
+        assert ok, response
+        sync = post.call_args_list[1]
+        assert sync.args[0] == "https://gw.example/v1/videos/sync"
+        assert sync.kwargs["files"] == {"model": (None, "alias-video")}
+        assert "prompt" not in sync.kwargs["files"]  # never start a render
