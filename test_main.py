@@ -1,6 +1,7 @@
 from unittest.mock import patch, MagicMock
 import asyncio
 import base64
+import json
 import threading
 import time
 import pytest
@@ -1022,3 +1023,176 @@ class TestMetadataLessSpecialModels:
         assert sync.args[0] == "https://gw.example/v1/videos/sync"
         assert sync.kwargs["files"] == {"model": (None, "alias-video")}
         assert "prompt" not in sync.kwargs["files"]  # never start a render
+
+
+def job_endpoint(model_metadata=None):
+    return {
+        "name": "Endpoint-1",
+        "base_url": "https://gw.example/v1",
+        "api_key": "k",
+        "model_metadata": model_metadata or {},
+    }
+
+
+def molecular_queue(queued=0, running=0, ready=2):
+    """The envelope /v1/responses returns: the router completes, the job does not."""
+    job = {
+        "id": "queue-bindcraft",
+        "object": "molecular.queue",
+        "model": "alias-bindcraft",
+        "queued": queued,
+        "running": running,
+        "workers_online": 2,
+        "model_workers_ready": ready,
+        "gpus_free": 7,
+        "poll_after_seconds": 10,
+    }
+    response = MagicMock(status_code=200, is_success=True)
+    response.json.return_value = {
+        "id": "resp_queue-bindcraft",
+        "object": "response",
+        "status": "completed",
+        "output": [],
+        "molecular_job": job,
+    }
+    return response
+
+
+class TestMolecularJobQueues:
+    """The five BioPortal models (esmfold2, bioemu2, rfdiffusion3, bindcraft,
+    proteina-complexa) are job queues, not chat models: the potato prompt got
+    400 "Use non-streaming molecular actions" on every run, which read as five
+    broken models. They answer POST /v1/responses with `input` as a JSON
+    string holding an action; {action: queue} reports the workers in <1s and
+    submits nothing, so the probe proves the route without spending GPU time
+    (a submit would start a real design run)."""
+
+    def test_aliases_are_detected_without_metadata(self):
+        with patch("main.ENDPOINTS", [job_endpoint()]):
+            for alias in (
+                "alias-esmfold2",
+                "alias-bioemu2",
+                "alias-rfdiffusion3",
+                "alias-bindcraft",
+                "alias-proteina-complexa",
+            ):
+                assert detect_model_type(alias, 0) == "molecular", alias
+            assert detect_model_type("alias-fast", 0) == "chat"
+
+    def test_advertised_capability_detects_a_new_queue(self):
+        endpoint = job_endpoint(
+            {"alias-new-design": {"capabilities": {"molecular_jobs": True, "chat": False}}}
+        )
+        with patch("main.ENDPOINTS", [endpoint]):
+            assert detect_model_type("alias-new-design", 0) == "molecular"
+
+    def test_probe_sends_a_queue_action_to_the_responses_route(self):
+        with patch("main.ENDPOINTS", [job_endpoint()]), patch(
+            "main.httpx.post", return_value=molecular_queue()
+        ) as post:
+            ok, response, _ = check_model("alias-bindcraft", "potato", "prompt", 0)
+
+        assert ok is True
+        assert response == "molecular queue: 0 queued, 0 running, 2 workers ready"
+        assert post.call_args.args[0] == "https://gw.example/v1/responses"
+        body = post.call_args.kwargs["json"]
+        assert body["model"] == "alias-bindcraft"
+        assert body["stream"] is False
+        # The action travels as a JSON *string*, which is what the shim parses.
+        assert json.loads(body["input"]) == {"action": "queue"}
+        assert post.call_args.kwargs["headers"]["Authorization"] == "Bearer k"
+
+    def test_a_queue_without_ready_workers_is_a_failure(self):
+        with patch("main.ENDPOINTS", [job_endpoint()]), patch(
+            "main.httpx.post", return_value=molecular_queue(ready=0)
+        ):
+            ok, response, _ = check_model("alias-bindcraft", "potato", "prompt", 0)
+
+        assert ok is False
+        assert response.startswith("An error occurred: No worker is ready")
+
+    def test_a_200_without_a_molecular_job_is_not_a_passing_probe(self):
+        empty = MagicMock(status_code=200, is_success=True)
+        empty.json.return_value = {"id": "resp_1", "status": "completed"}
+        with patch("main.ENDPOINTS", [job_endpoint()]), patch(
+            "main.httpx.post", return_value=empty
+        ):
+            ok, response, _ = check_model("alias-bindcraft", "potato", "prompt", 0)
+
+        assert ok is False
+        assert response == "An error occurred: Not a molecular queue response"
+
+    def test_unserved_route_is_reported_by_name(self):
+        missing = MagicMock(status_code=404, is_success=False, text="Not Found")
+        with patch("main.ENDPOINTS", [job_endpoint()]), patch(
+            "main.httpx.post", return_value=missing
+        ):
+            ok, response, _ = check_model("alias-esmfold2", "potato", "prompt", 0)
+
+        assert ok is False
+        assert response == (
+            "An error occurred: Molecular queue route is not served (404)"
+        )
+
+
+class TestCommandDrivenGeometryModels:
+    """vggt-omega-1b and alias-visual-geometry do answer /v1/chat/completions,
+    but the message body is a command line: the potato prompt was rejected
+    with 400 "unknown command 'give'; use step, finish, download, status or
+    queue" on every run. Their own `queue` command returns the session/GPU
+    state as JSON in <1s, and costs no reconstruction."""
+
+    def test_models_are_detected(self):
+        with patch("main.ENDPOINTS", [job_endpoint()]):
+            assert detect_model_type("vggt-omega-1b", 0) == "commands"
+            assert detect_model_type("alias-visual-geometry", 0) == "commands"
+            assert detect_model_type("alias-fast", 0) == "chat"
+
+    def test_owner_metadata_detects_a_future_vggt_model(self):
+        endpoint = job_endpoint({"vggt-omega-2b": {"owned_by": "vggt"}})
+        with patch("main.ENDPOINTS", [endpoint]):
+            assert detect_model_type("vggt-omega-2b", 0) == "commands"
+
+    @staticmethod
+    def answered(content):
+        reply = MagicMock(status_code=200, is_success=True)
+        reply.json.return_value = {
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": content}}]
+        }
+        return reply
+
+    def test_probe_sends_the_queue_command_not_a_prompt(self):
+        content = json.dumps({"queue": {
+            "gpu_busy": False, "waiting": 0, "other_sessions_active": 0,
+            "message": "nobody else is mapping right now"}})
+        with patch("main.ENDPOINTS", [job_endpoint()]), patch(
+            "main.httpx.post", return_value=self.answered(content)
+        ) as post:
+            ok, response, _ = check_model("vggt-omega-1b", "potato", "prompt", 0)
+
+        assert ok is True
+        assert response == "geometry queue: gpu_busy=False, waiting=0 sessions"
+        assert post.call_args.args[0] == "https://gw.example/v1/chat/completions"
+        body = post.call_args.kwargs["json"]
+        assert body["model"] == "vggt-omega-1b"
+        assert body["messages"] == [{"role": "user", "content": "queue"}]
+
+    def test_busy_gpu_is_a_healthy_queue(self):
+        was_busy = self.answered(json.dumps({"queue": {
+            "gpu_busy": True, "waiting": 2, "other_sessions_active": 2}}))
+        with patch("main.ENDPOINTS", [job_endpoint()]), patch(
+            "main.httpx.post", return_value=was_busy
+        ):
+            ok, response, _ = check_model("alias-visual-geometry", "potato", "prompt", 0)
+
+        assert ok is True
+        assert response == "geometry queue: gpu_busy=True, waiting=2 sessions"
+
+    def test_unknown_command_reply_is_a_failure(self):
+        with patch("main.ENDPOINTS", [job_endpoint()]), patch(
+            "main.httpx.post", return_value=self.answered("sure, here is a potato")
+        ):
+            ok, response, _ = check_model("vggt-omega-1b", "potato", "prompt", 0)
+
+        assert ok is False
+        assert response == "An error occurred: Not a geometry command response"

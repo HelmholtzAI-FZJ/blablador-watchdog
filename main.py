@@ -315,6 +315,24 @@ def get_endpoint_clients(endpoint_id: int = 0):
     return ep["client"], ep["embedding_client"]
 
 
+# Models that answer /v1/responses with molecular_job objects and refuse the
+# chat probe outright (400 "Use non-streaming molecular actions"). The gateway
+# advertises capabilities.molecular_jobs, but the catalog has been served
+# without metadata before, so the aliases are listed here as well.
+MOLECULAR_MODELS = frozenset({
+    "alias-esmfold2",
+    "alias-bioemu2",
+    "alias-rfdiffusion3",
+    "alias-bindcraft",
+    "alias-proteina-complexa",
+})
+
+# VGGT answers /v1/chat/completions, but only to its own commands (queue, step,
+# finish, download, status). A prompt gets "unknown command 'give'" with 400.
+COMMAND_MODELS = frozenset({"vggt-omega-1b", "alias-visual-geometry"})
+GEOMETRY_QUEUE_COMMAND = "queue"
+
+
 def is_embedding_model(model):
     if "embedding" in model.lower():
         return True
@@ -338,6 +356,25 @@ def output_modalities(metadata: Dict) -> List:
     return []
 
 
+def is_molecular_model(model: str, endpoint_id: int = 0) -> bool:
+    """A molecular job queue: /v1/responses takes actions, not prompts."""
+    if model in MOLECULAR_MODELS:
+        return True
+    capabilities = model_metadata(model, endpoint_id).get("capabilities")
+    return isinstance(capabilities, dict) and bool(capabilities.get("molecular_jobs"))
+
+
+def is_command_model(model: str, endpoint_id: int = 0) -> bool:
+    """VGGT: answers chat completions, but only with one of its commands."""
+    if model in COMMAND_MODELS:
+        return True
+    metadata = model_metadata(model, endpoint_id)
+    if str(metadata.get("owned_by") or "").lower() == "vggt":
+        return True
+    capabilities = metadata.get("capabilities")
+    return isinstance(capabilities, dict) and bool(capabilities.get("commands"))
+
+
 def detect_model_type(model: str, endpoint_id: int = 0) -> str:
     """Return the API capability to probe for a discovered model."""
     metadata = model_metadata(model, endpoint_id)
@@ -352,6 +389,12 @@ def detect_model_type(model: str, endpoint_id: int = 0) -> str:
         return "embedding"
     if is_reranking_model(model):
         return "rerank"
+    # Molecular queues and command-driven geometry models reject text entirely,
+    # so they must be recognised before any prompt-based route.
+    if is_molecular_model(model, endpoint_id):
+        return "molecular"
+    if is_command_model(model, endpoint_id):
+        return "commands"
     # alias-clef answers no chat route; the catalog only advertises its own
     # decision route (capabilities ["systemone"], decision_endpoint).
     # The gateway sometimes serves the catalog without that metadata, so the
@@ -906,6 +949,9 @@ def get_decision_response(model: str, endpoint_id: int = 0):
 
 
 RERANK_QUERY = "potato"
+# A molecular action, not a prompt: {action: queue} reports the model's GPU
+# workers without submitting, spending GPU time or creating a job.
+MOLECULAR_PROBE_ACTION = {"action": "queue"}
 # One document that must win for the query, and one that must not. A reranking
 # model that cannot separate them is broken even when the route answers 200.
 RERANK_DOCUMENTS = (
@@ -952,6 +998,107 @@ def get_rerank_response(model: str, endpoint_id: int = 0):
         return f"Wrong ranking: {summary}", None
     except Exception as error:
         return f"An error occurred: {error}", None
+
+
+MOLECULAR_PROBE_TIMEOUT = 30.0
+GEOMETRY_PROBE_TIMEOUT = 30.0
+
+
+def _root_url(base_url: str) -> str:
+    """Drop the /v1 suffix: /v1/responses is advertised root-relative."""
+    return base_url[: -len("/v1")] if base_url.endswith("/v1") else base_url
+
+
+@retry_with_exponential_backoff
+def get_molecular_response(model: str, endpoint_id: int = 0):
+    """Ask a molecular queue for its state instead of submitting GPU work.
+
+    These models refuse prompts (400 on /v1/chat/completions) and answer only
+    POST /v1/responses with `input` as a JSON *string* holding an action. The
+    probe asks for the queue, which costs no GPU time and is answered in <1s,
+    and the route is proven by a molecular.queue object coming back: a 200 from
+    the router says nothing, because the router completes without the job.
+    """
+    try:
+        base_url, headers = _endpoint_request_config(endpoint_id)
+        response = httpx.post(
+            f"{_root_url(base_url)}/v1/responses",
+            headers={**headers, "Content-Type": "application/json"},
+            json={
+                "model": model,
+                "stream": False,
+                "input": json.dumps(MOLECULAR_PROBE_ACTION),
+            },
+            timeout=MOLECULAR_PROBE_TIMEOUT,
+        )
+        if response.status_code == 404:
+            return "An error occurred: Molecular queue route is not served (404)", None
+        response.raise_for_status()
+        job = (response.json() or {}).get("molecular_job")
+        if not isinstance(job, dict) or job.get("object") != "molecular.queue":
+            return "An error occurred: Not a molecular queue response", None
+        summary = (
+            f"molecular queue: {job.get('queued')} queued, {job.get('running')} running, "
+            f"{job.get('model_workers_ready')} workers ready"
+        )
+        # Ready workers are what a submit needs. A reachable but unstaffed
+        # queue is the molecular twin of a chat model answering 503.
+        if job.get("model_workers_ready"):
+            return summary, None
+        return f"An error occurred: No worker is ready for this model ({summary})", None
+    except Exception as error:
+        return f"An error occurred: {error}", None
+
+
+@retry_with_exponential_backoff
+def get_geometry_response(model: str, endpoint_id: int = 0):
+    """Ask VGGT for its queue state; it renders only from the commands route.
+
+    vggt-omega-1b takes chat completions, but the message body is the command
+    line: "queue" is answered with the session/GPU state in <1s, while any
+    prose is rejected with 400 "unknown command 'give'". The probe never
+    starts a reconstruction (that needs uploaded photos and a session).
+    """
+    try:
+        base_url, headers = _endpoint_request_config(endpoint_id)
+        response = httpx.post(
+            f"{base_url}/chat/completions",
+            headers={**headers, "Content-Type": "application/json"},
+            json={
+                "model": model,
+                "stream": False,
+                "messages": [{"role": "user", "content": GEOMETRY_QUEUE_COMMAND}],
+            },
+            timeout=GEOMETRY_PROBE_TIMEOUT,
+        )
+        response.raise_for_status()
+        choices = (response.json() or {}).get("choices") or []
+        message = choices[0].get("message") if choices and isinstance(choices[0], dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        queue = geometry_queue(content)
+        if queue is None:
+            return "An error occurred: Not a geometry command response", None
+        summary = (
+            f"geometry queue: gpu_busy={queue.get('gpu_busy')}, "
+            f"waiting={queue.get('waiting')} sessions"
+        )
+        # Busy or waiting is the model's own state, not a failure; only a reply
+        # without the queue object means the command route is broken.
+        return summary, None
+    except Exception as error:
+        return f"An error occurred: {error}", None
+
+
+def geometry_queue(content):
+    """Pull the queue object out of a command reply ("{...}"), else None."""
+    if not isinstance(content, str) or not content.strip():
+        return None
+    try:
+        parsed = json.loads(content)
+    except ValueError:
+        return None
+    queue = parsed.get("queue") if isinstance(parsed, dict) else None
+    return queue if isinstance(queue, dict) else None
 
 
 def shorten_error(reason: str, limit: int = MAX_ERROR_REASON_CHARS) -> str:
@@ -1017,6 +1164,14 @@ def _probe_model(model, word, prompt, endpoint_id: int = 0):
             response,
             tokens_used,
         )
+
+    if model_type == "molecular":
+        response, tokens_used = get_molecular_response(model, endpoint_id)
+        return not response.startswith("An error occurred:"), response, tokens_used
+
+    if model_type == "commands":
+        response, tokens_used = get_geometry_response(model, endpoint_id)
+        return not response.startswith("An error occurred:"), response, tokens_used
 
     response, tokens_used = get_llm_response(prompt, model, endpoint_id)
     if response == "An error occurred: Empty response content from LLM":

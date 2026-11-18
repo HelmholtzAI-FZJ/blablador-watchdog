@@ -62,6 +62,8 @@ dispatches. Never send the potato chat prompt to a non-chat model.
 | `audio` | `whisper`, `task_type` transcription/speech-to-text | `POST /v1/audio/transcriptions` with `sample.wav` |
 | `video` | `task_type` ti2v/t2v/video, `modalities.output` video, `minimax-h3`, `alias-video` | `POST /videos` JSON; on 404 `POST /videos/sync` multipart with only `model` — missing-prompt validation counts as healthy |
 | `image` | `qwen-image`, `flux`, `alias-image`, `task_type`/pipeline image | `POST /v1/images/generations`: one real 50x50, 4-step render (alias-image snaps it to 32x32) of "a potato"; decoded `b64_json` must be PNG/JPEG/WebP/GIF |
+| `molecular` | `MOLECULAR_MODELS` (the five BioPortal aliases) or metadata `capabilities.molecular_jobs` | `POST /v1/responses` with `input` as a JSON *string* `{"action": "queue"}`; the reply must carry a `molecular_job` whose `object` is `molecular.queue` **and** `model_workers_ready > 0` |
+| `commands` | `COMMAND_MODELS` (`vggt-omega-1b`, `alias-visual-geometry`), metadata `owned_by: vggt` or `capabilities.commands` | `POST /v1/chat/completions` whose single user message is the *command* `queue`; `content` must parse to `{"queue": {...}}` |
 
 Evidence for the rerank route on `api.blablador.fz-juelich.de`
 (`alias-qwen3-{4b,8b}-reranking`): chat completions → 404, embeddings → 500,
@@ -98,6 +100,36 @@ prompt on `/v1/chat/completions` with HTTP 200 in ~20s and
 data URL attached (868 KB measured in `model_metrics`).
 `MAX_ERROR_REASON_CHARS` (200, applied in `check_model()` for every model type)
 bounds failure reasons so no model payload reaches a report or the database.
+
+### Molecular job queues (BioPortal) and VGGT are not chat models
+
+Neither family has ever answered the potato prompt; both used to spend the
+whole run in `Failures` as false alarms. Measured 2026-11-18 on
+`api.blablador.fz-juelich.de`:
+
+- `alias-esmfold2`, `alias-bioemu2`, `alias-rfdiffusion3`, `alias-bindcraft`,
+  `alias-proteina-complexa` answer `/v1/chat/completions` with `400 Use
+  non-streaming molecular actions; jobs run asynchronously`. They take
+  `POST /v1/responses` with `stream: false` and `input` as a **JSON string**
+  holding an action (`submit`/`status`/`cancel`/`queue`/`artifact`), and only
+  `molecular_job` in the reply is real — the router completes without the job.
+  The probe therefore sends `{"action": "queue"}` (0.4–0.5 s, no GPU time, no
+  job created) and requires `object: molecular.queue` with
+  `model_workers_ready > 0`. **Never probe with `submit`**: that starts a real
+  design run on someone's account. This protocol is BioPortal's
+  (`../bioportal`, `jobs/blablador.py`); the capability is advertised as
+  `capabilities.molecular_jobs`, but the aliases are also listed by name
+  because the catalog has been served without metadata before.
+- `vggt-omega-1b` and `alias-visual-geometry` *do* answer chat completions,
+  but the message body is a command line: the potato prompt gets `400 unknown
+  command 'give'; use step, finish, download, status or queue`. The probe sends
+  the `queue` command (0.4 s) and requires the reply to parse to
+  `{"queue": {"gpu_busy": …, "waiting": …}}`. A busy GPU is the model's own
+  state, not a failure; a reply without the queue object is.
+
+Both routes are additions to the dispatch in `_probe_model()`; keep their
+detection *before* the prompt-based routes, since the potato prompt can never
+succeed on either.
 
 ## Thinking models: two tiers, plus a token budget that truncates
 
