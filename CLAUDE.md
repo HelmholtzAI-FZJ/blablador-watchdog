@@ -205,3 +205,22 @@ accepts that as a last resort, truncated to 500 chars.
 - `deploy-dsv41/`, `shinrai/`, `bench2.py` and the generated PNGs are local
   scratch/artifacts — never sweep them into a commit.
 - `.env` holds API keys and is gitignored. Never commit or print its contents.
+
+## Plots (`plot_metrics.py`)
+
+With ~80 live models, one line per model is unreadable — never go back to it.
+Charts are **one row per model**, sorted so problems sit on top:
+
+- `metrics_plots.png`: fleet line (% of models passing per probe run, gaps >3h
+  broken, runs <90% in red), a daily failure-rate grid (white→red, grey = not
+  probed; currently failing models first, label in bold red with ✗), and a
+  latency dot plot sharing the row order (7-day median, p10–p90 bar, previous
+  week's median as a ring, ▲/▼ ratio when it moved ≥1.5×, log scale).
+- `supercomputer_model_status.png`: hourly status timeline per
+  `cluster: model` (status colours, last value carried forward) plus current
+  job count.
+- Only models probed in the last 3 days are shown; retired ones belong to the
+  report's model-list diff. Aggregation lives in `summarize_models()` (pure).
+- `supercomputer_model_status` holds junk model names (`$MODEL_ID`, `$ROOT`,
+  `\`, `canary)`) from `vllm_jobs.py` parsing shell scripts — a parser bug
+  there, not a plotting one.
