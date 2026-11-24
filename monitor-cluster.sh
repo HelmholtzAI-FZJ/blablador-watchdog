@@ -326,28 +326,17 @@ cmd_summary() {
     echo "  (run: ./monitor-cluster.sh throttled  for full detail)"
     echo ""
 
-    # Blacklisted + punished count
-    local blacklisted_punished=$($REDIS_CLI HGETALL "access_control:users" 2>/dev/null | grep -E "blacklisted|punished" | wc -l | tr -d ' ')
-    if [ -z "$blacklisted_punished" ]; then
-        blacklisted_punished=0
-    fi
-    echo -e "Banned/Punished users: ${RED}$blacklisted_punished${NC}"
+    # Bans: details in the "Banned" sections below
     if [ "$($REDIS_CLI EXISTS access_control:users 2>/dev/null)" != "1" ]; then
         echo -e "${RED}WARNING: access_control:users does not exist in $REDIS_NAMESPACE Redis —${NC}"
         echo -e "${RED}  no bans, superuser or elevated grants are in effect (Redis has no persistence).${NC}"
+    else
+        local statuses=$($REDIS_CLI HVALS "access_control:users" 2>/dev/null)
+        echo -e "Blacklisted users: ${RED}$(echo "$statuses" | grep -cx blacklisted)${NC}   Punished users: ${RED}$(echo "$statuses" | grep -cx punished)${NC}"
     fi
+    echo -e "Banned e-mail domains: ${RED}$($REDIS_CLI SCARD "access_control:blacklisted_domains" 2>/dev/null)${NC}"
+    echo ""
 
-    # Show banned/punished users if any
-    if [ "$blacklisted_punished" -gt 0 ]; then
-        echo ""
-        echo -e "${YELLOW}Banned/Punished users:${NC}"
-        $REDIS_CLI HGETALL "access_control:users" 2>/dev/null | paste - - | while read -r email status; do
-            if [ "$status" = "blacklisted" ] || [ "$status" = "punished" ]; then
-                echo "  - $email ($status)"
-            fi
-        done
-    fi
-    
     # Models used
     local model_count=$(get_active_models | wc -l | tr -d ' ')
     if [ -z "$model_count" ]; then
@@ -561,33 +550,89 @@ cmd_models() {
 }
 
 # Banned/blacklisted users
+# Emails of tokens that made requests in the current rate window.
+active_user_emails() {
+    $REDIS_CLI KEYS "rate:*" 2>/dev/null | cut -d':' -f2 | sort -u | while read -r token; do
+        local email=$(get_user_email "$token")
+        [ -n "$email" ] && echo "$email"
+    done | sort -u
+}
+
+# Requests in the current window for one email (sum over its tokens/models).
+email_request_count() {
+    local email="$1"
+    $REDIS_CLI KEYS "rate:*" 2>/dev/null | while read -r key; do
+        local token=$(echo "$key" | cut -d':' -f2)
+        [ "$(get_user_email "$token")" = "$email" ] && $REDIS_CLI GET "$key"
+    done | awk '{s+=$1} END {print s+0}'
+}
+
+# Banned domain matching an email, same rule as APISIX: exact or subdomain.
+banned_domain_for() {
+    local domain="${1##*@}"
+    domain=$(echo "$domain" | tr 'A-Z' 'a-z')
+    echo "$BANNED_DOMAINS" | while read -r banned; do
+        [ -z "$banned" ] && continue
+        if [ "$domain" = "$banned" ] || [[ "$domain" == *".$banned" ]]; then
+            echo "$banned"
+            return
+        fi
+    done
+}
+
+# Banned users: (1) blacklisted/punished in access_control:users,
+# (2) everyone at a banned e-mail domain (403), (3) active users hitting one.
 cmd_banned_users() {
     local limit="${1:-50}"
-    
-    print_header "Banned (Blacklisted) Users"
-    
-    # Get all users from access_control:users hash
-    local users=$($REDIS_CLI HGETALL "access_control:users" 2>/dev/null)
-    
-    if [ -z "$users" ]; then
-        echo "No banned users found"
-        return
-    fi
-    
-    local email_width=50
-    local status_width=12
-    
-    printf "${BLUE}%-*s${NC} | %-*s\n" "$email_width" "Email" "$status_width" "Status"
-    printf "%$((email_width + status_width + 3))s\n" | tr ' ' '-'
-    
-    # Parse HGETALL output (alternating key-value pairs)
-    echo "$users" | paste - - | while read -r email status; do
-        if [ "$status" = "blacklisted" ] || [ "$status" = "punished" ]; then
-            local email_display=$(printf "%-${email_width}s" "$email")
-            local status_formatted=$(format_status "$status")
-            printf "%s | %s\n" "$email_display" "$status_formatted"
+    local active=$(active_user_emails)
+    BANNED_DOMAINS=$($REDIS_CLI SMEMBERS "access_control:blacklisted_domains" 2>/dev/null | sort)
+
+    print_header "Banned Users (access_control:users)"
+    if [ "$($REDIS_CLI EXISTS access_control:users 2>/dev/null)" != "1" ]; then
+        echo -e "${RED}access_control:users is missing — no user bans in effect (wiped by a Redis restart?)${NC}"
+    else
+        local rows=$($REDIS_CLI HGETALL "access_control:users" 2>/dev/null | paste - - \
+            | awk '$2 == "blacklisted" || $2 == "punished"' | sort -k2,2 -k1,1)
+        if [ -z "$rows" ]; then
+            echo "No blacklisted or punished users"
+        else
+            echo "blacklisted = 403 on every request · punished = 1 request/min"
+            printf "${BLUE}%-50s${NC} | %-12s | %s\n" "User" "Status" "Requests now"
+            printf "%80s\n" | tr ' ' '-'
+            echo "$rows" | head -n "$limit" | while read -r user status; do
+                local now="-"
+                if echo "$active" | grep -qxF "$user"; then
+                    now="${RED}$(email_request_count "$user") (active)${NC}"
+                fi
+                printf "%-50s | %b | %b\n" "$user" "$(printf '%-12s' "$(format_status "$status")")" "$now"
+            done
+            local n=$(echo "$rows" | wc -l | tr -d ' ')
+            [ "$n" -gt "$limit" ] && echo "... $((n - limit)) more (use --limit)"
         fi
-    done | head -n "$limit"
+    fi
+
+    echo ""
+    print_header "Banned E-mail Domains (access_control:blacklisted_domains)"
+    if [ -z "$BANNED_DOMAINS" ]; then
+        echo "No banned domains"
+    else
+        echo "$(echo "$BANNED_DOMAINS" | wc -l | tr -d ' ') domains, every user at the domain or a subdomain gets 403:"
+        echo "$BANNED_DOMAINS" | paste -sd' ' - | fold -s -w 100 | sed 's/^/  /'
+        echo ""
+        local hits=$(echo "$active" | while read -r email; do
+            [ -z "$email" ] && continue
+            local d=$(banned_domain_for "$email")
+            [ -n "$d" ] && echo "$email|$d"
+        done)
+        if [ -n "$hits" ]; then
+            echo -e "${RED}Active users at a banned domain (requests are being refused):${NC}"
+            echo "$hits" | while IFS='|' read -r email d; do
+                echo "  - $email  (domain $d, $(email_request_count "$email") requests now)"
+            done
+        else
+            echo "No active user is at a banned domain."
+        fi
+    fi
 }
 
 # Full report

@@ -257,5 +257,13 @@ model, throttled and banned lists. Defaults: `KUBE_CONTEXT`,
   `scripts/configure-users.sh` and vanishes on every pod restart; the summary
   prints a WARNING when the hash is missing. Measured 2026-11-24: missing
   after the 17h-ago restart.
+- "Banned" has three sources, all shown by `banned-users` (and in `all`):
+  `blacklisted` (403) / `punished` (1 req/min) entries in
+  `access_control:users`, with request counts for those still active; the
+  `access_control:blacklisted_domains` set (403 for the domain and every
+  subdomain — `banned_domain_for` mirrors the APISIX suffix rule); and active
+  users whose e-mail falls under a banned domain. Temporary `throttle:*`
+  blocks stay in `throttled`. Seed lists live in the APISIX repo
+  (`scripts/add_user_status.sh`, `scripts/add_domain_bans.sh`).
 - Never print raw `rate:*` / `user:priority:*` key names: they contain users'
   API tokens (`glpat-…`). Show only prefixes or resolved e-mails.
