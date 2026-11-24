@@ -3,8 +3,27 @@
 # Cluster Usage Monitoring Script
 # Monitors active users, their rights, used models, rate limits, and throttle status
 
+# Production traffic for api.blablador.fz-juelich.de goes through APISIX in
+# `apisix-all-test` since 2026-11-20. The old OpenResty Redis in `app-ns`
+# receives no requests any more, so reading it shows empty lists.
+KUBE_CONTEXT="${KUBE_CONTEXT:-blablador-import}"
+REDIS_NAMESPACE="${REDIS_NAMESPACE:-apisix-all-test}"
 REDIS_HOST="${REDIS_HOST:-localhost}"
-REDIS_PORT="${REDIS_PORT:-6379}"
+# Own local port, so a stale forward to another Redis on 6379 is never reused.
+REDIS_PORT="${REDIS_PORT:-6381}"
+
+# APISIX keeps rate limits in its config (configmap apisix-blablador,
+# rate_limits.default), not in `rate_limits:*` Redis keys. Used when Redis
+# has no per-model override. Requests per 60s window.
+declare_default_limit() {
+    case "$1" in
+        punished) echo 1 ;;
+        internal) echo 40 ;;
+        elevated) echo 140 ;;
+        superuser) echo -1 ;;
+        *) echo 20 ;;
+    esac
+}
 
 REDIS_CLI="redis-cli -h $REDIS_HOST -p $REDIS_PORT"
 
@@ -19,7 +38,7 @@ if ! command -v redis-cli &> /dev/null; then
     echo "  - Docker: docker run -it --rm redis redis-cli --help"
     echo ""
     echo "Or use kubectl to access Redis directly:"
-    echo "  kubectl exec -n app-ns -it <redis-pod-name> -- redis-cli"
+    echo "  kubectl --context blablador-import exec -n apisix-all-test -it <redis-pod-name> -- redis-cli"
     exit 1
 fi
 
@@ -64,7 +83,7 @@ Examples:
 Kubernetes:
   # The script now auto-starts the port-forward if needed
   # Or explicitly start it:
-  kubectl port-forward svc/redis-service 6379:6379 -n app-ns &
+  kubectl --context blablador-import port-forward svc/redis-service 6381:6379 -n apisix-all-test &
   export REDIS_HOST=localhost
   $0
 
@@ -207,7 +226,7 @@ get_rate_limit() {
         if [ -n "$limit" ] && [ "$limit" != "(nil)" ]; then
             echo "$limit"
         else
-            echo "0"
+            declare_default_limit "$priority"
         fi
     fi
 }
@@ -295,8 +314,7 @@ cmd_summary() {
     echo ""
     
     # Active users count
-    local rate_keys=$($REDIS_CLI KEYS "rate:*" 2>/dev/null | wc -l | tr -d ' ')
-    local active_users=$rate_keys
+    local active_users=$($REDIS_CLI KEYS "rate:*" 2>/dev/null | cut -d':' -f2 | sort -u | wc -l | tr -d ' ')
     echo -e "Active users (requests in last window): ${GREEN}$active_users${NC}"
     
     # Throttled users count
@@ -314,6 +332,10 @@ cmd_summary() {
         blacklisted_punished=0
     fi
     echo -e "Banned/Punished users: ${RED}$blacklisted_punished${NC}"
+    if [ "$($REDIS_CLI EXISTS access_control:users 2>/dev/null)" != "1" ]; then
+        echo -e "${RED}WARNING: access_control:users does not exist in $REDIS_NAMESPACE Redis —${NC}"
+        echo -e "${RED}  no bans, superuser or elevated grants are in effect (Redis has no persistence).${NC}"
+    fi
 
     # Show banned/punished users if any
     if [ "$blacklisted_punished" -gt 0 ]; then
@@ -591,7 +613,7 @@ FORCE_PORT_FORWARD=false
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        summary|active-users|rate-limits|throttled|models|all|help)
+        summary|active-users|rate-limits|throttled|banned-users|models|all|help)
             COMMAND="$1"
             shift
             ;;
@@ -620,7 +642,7 @@ done
 # Auto-start port-forward if not running
 start_port_forward() {
     echo "Starting port-forward for Redis..."
-    kubectl --context blablador-import port-forward svc/redis-service 6379:6379 -n app-ns > /tmp/pf-redis.log 2>&1 &
+    kubectl --context "$KUBE_CONTEXT" port-forward svc/redis-service "$REDIS_PORT:6379" -n "$REDIS_NAMESPACE" > /tmp/pf-redis.log 2>&1 &
     PF_PID=$!
     echo "Port-forward started with PID $PF_PID"
     
@@ -655,7 +677,7 @@ if ! $REDIS_CLI ping 2>/dev/null | grep -q PONG; then
                 echo ""
                 echo "Diagnostics:"
                 echo "  - Testing Redis pod directly:"
-                kubectl --context blablador-import exec -n app-ns -i $(kubectl --context blablador-import get pod -n app-ns -l app=redis -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) -- redis-cli ping 2>/dev/null
+                kubectl --context "$KUBE_CONTEXT" exec -n "$REDIS_NAMESPACE" -i $(kubectl --context "$KUBE_CONTEXT" get pod -n "$REDIS_NAMESPACE" -l app=redis -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) -- redis-cli ping 2>/dev/null
                 echo ""
                 exit 1
             fi
@@ -678,7 +700,7 @@ if ! $REDIS_CLI ping 2>/dev/null | grep -q PONG; then
                     echo ""
                     echo "Diagnostics:"
                     echo "  - Testing Redis pod directly:"
-                    kubectl --context blablador-import exec -n app-ns -i $(kubectl --context blablador-import get pod -n app-ns -l app=redis -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) -- redis-cli ping 2>/dev/null
+                    kubectl --context "$KUBE_CONTEXT" exec -n "$REDIS_NAMESPACE" -i $(kubectl --context "$KUBE_CONTEXT" get pod -n "$REDIS_NAMESPACE" -l app=redis -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) -- redis-cli ping 2>/dev/null
                     echo ""
                     exit 1
                 fi
@@ -690,7 +712,7 @@ if ! $REDIS_CLI ping 2>/dev/null | grep -q PONG; then
             echo ""
             echo "Diagnostics:"
             echo "  - Testing Redis pod directly:"
-            kubectl --context blablador-import exec -n app-ns -i $(kubectl --context blablador-import get pod -n app-ns -l app=redis -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) -- redis-cli ping 2>/dev/null
+            kubectl --context "$KUBE_CONTEXT" exec -n "$REDIS_NAMESPACE" -i $(kubectl --context "$KUBE_CONTEXT" get pod -n "$REDIS_NAMESPACE" -l app=redis -o jsonpath='{.items[0].metadata.name}' 2>/dev/null) -- redis-cli ping 2>/dev/null
             echo ""
             echo "Hint: Use --force-port-forward to restart the port-forward"
             exit 1

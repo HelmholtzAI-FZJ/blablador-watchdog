@@ -237,3 +237,25 @@ a `VAR=` assignment in the script, a lone trailing `)` stripped, and every
 match is tried until one passes `is_valid_model_name()`. Fleet launchers that
 serve several models from a loop report their `FLEET_MODEL`
 (`trustllm-v2-8b-fleet`).
+
+## Gateway user monitoring (`monitor-cluster.sh`)
+
+Since 2026-11-20 `api.blablador.fz-juelich.de` is served by APISIX in
+namespace `apisix-all-test` (context `blablador-import`; source:
+gitlab.jsc.fz-juelich.de/rushchanskii2/blablador-apisix-api). The old
+OpenResty Redis in `app-ns` gets no traffic — reading it gave empty top-user,
+model, throttled and banned lists. Defaults: `KUBE_CONTEXT`,
+`REDIS_NAMESPACE=apisix-all-test`, local port **6381** so a stale forward on
+6379 to the old Redis is never reused.
+
+- Rate limits are in the APISIX configmap (`rate_limits.default`: punished 1,
+  external 20, internal 40, elevated 140 req/60s, superuser unlimited), not in
+  `rate_limits:*` keys; `declare_default_limit` mirrors them. Update both
+  together.
+- The APISIX Redis has no persistence. `access_control:users` (bans,
+  superuser/elevated grants) is filled by hand via the APISIX repo's
+  `scripts/configure-users.sh` and vanishes on every pod restart; the summary
+  prints a WARNING when the hash is missing. Measured 2026-11-24: missing
+  after the 17h-ago restart.
+- Never print raw `rate:*` / `user:priority:*` key names: they contain users'
+  API tokens (`glpat-…`). Show only prefixes or resolved e-mails.
