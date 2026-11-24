@@ -221,6 +221,19 @@ Charts are **one row per model**, sorted so problems sit on top:
   job count.
 - Only models probed in the last 3 days are shown; retired ones belong to the
   report's model-list diff. Aggregation lives in `summarize_models()` (pure).
-- `supercomputer_model_status` holds junk model names (`$MODEL_ID`, `$ROOT`,
-  `\`, `canary)`) from `vllm_jobs.py` parsing shell scripts — a parser bug
-  there, not a plotting one.
+- The supercomputer chart shows only deployments in each cluster's latest
+  snapshot (within 10 min of its newest row) and drops names failing
+  `vllm_jobs.is_valid_model_name()`, so renamed/stopped jobs and pre-fix junk
+  rows don't linger for a week.
+
+## Supercomputer job names (`vllm_jobs.py`)
+
+`extract_model()` reads the launch script flattened to one line, so shell
+syntax leaks into values. Before 2026-11-24 it stored `00`/`15`/`80` (quoted
+names with spaces), `\` (line continuations), `$MODEL_ID`/`$ROOT`/`${names[@]}`
+(variables) and `canary)` (last element of a bash `ARGS=(...)` array). Rules:
+quoted values are read whole, `\` continuations skipped, `$VAR` resolved from
+a `VAR=` assignment in the script, a lone trailing `)` stripped, and every
+match is tried until one passes `is_valid_model_name()`. Fleet launchers that
+serve several models from a loop report their `FLEET_MODEL`
+(`trustllm-v2-8b-fleet`).

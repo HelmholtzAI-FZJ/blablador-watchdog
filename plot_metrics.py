@@ -29,6 +29,8 @@ import numpy as np  # noqa: E402
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap  # noqa: E402
 from matplotlib.patches import Patch  # noqa: E402
 
+from vllm_jobs import is_valid_model_name  # noqa: E402
+
 DEFAULT_DB_PATH = os.path.expanduser("~/.blablador_watchdog/metrics.db")
 
 HEALTH_DAYS = 14          # columns in the health grid
@@ -294,11 +296,21 @@ def plot_supercomputers(rows: list[dict], out: str = "supercomputer_model_status
     latest = {}
     for r in rows:
         dt = _ts(r["timestamp"])
-        if dt < start:
-            continue
+        if dt < start or not is_valid_model_name(r["model"]):
+            continue  # junk names from the old launch-script parser
         key = f"{r['cluster']}: {r['model']}"
         series[key][int((dt - start).total_seconds() // 3600)] = r["status"]
         latest[key] = r
+    # Keep only deployments in each cluster's latest snapshot: renamed or
+    # shut-down ones would otherwise linger as stale rows for a week.
+    newest = defaultdict(lambda: start)
+    for r in latest.values():
+        newest[r["cluster"]] = max(newest[r["cluster"]], _ts(r["timestamp"]))
+    gone = [k for k, r in latest.items()
+            if newest[r["cluster"]] - _ts(r["timestamp"]) > timedelta(minutes=10)]
+    for k in gone:
+        series.pop(k)
+        latest.pop(k)
     if not series:
         print("No supercomputer model status data to plot")
         return
