@@ -66,3 +66,36 @@ def test_recent_failed_vllm_job_is_dead():
     assert statuses[0].model == "alias-mis"
     assert statuses[0].status == "dead"
     assert statuses[0].availability is False
+
+
+class TestShellSyntaxInModelNames:
+    """Flattened launch scripts used to yield `00`, `\\`, `$MODEL_ID`, `canary)`."""
+
+    def test_quoted_served_name_with_spaces(self):
+        cmd = 'vllm serve /p/models/aleph --served-model-name "00 - Aleph Kolibri" alias-aleph'
+        assert extract_model("vllm", cmd) == "00 - Aleph Kolibri"
+
+    def test_line_continuation_before_value(self):
+        cmd = "vllm serve /p/models/x --served-model-name \\ alias-code \\ --port 8000"
+        assert extract_model("vllm", cmd) == "alias-code"
+
+    def test_shell_variable_is_resolved_from_assignment(self):
+        cmd = "MODEL_ID=alias-eve vllm serve /p/models/eve --served-model-name $MODEL_ID"
+        assert extract_model("vllm", cmd) == "alias-eve"
+
+    def test_unresolvable_variable_falls_back_to_model_path(self):
+        cmd = "vllm serve --model /p/models/Qwen3-8B --served-model-name ${names[@]}"
+        assert extract_model("vllm", cmd) == "Qwen3-8B"
+
+    def test_bash_array_close_paren_is_stripped(self):
+        cmd = 'ARGS=(vllm serve "$MODEL" --port 8271 --served-model-name canary) [[ $SLURM_PROCID == 0 ]]'
+        assert extract_model("tp4dp8.slurm", cmd) == "canary"
+
+    def test_fleet_launcher_reports_fleet_name(self):
+        cmd = ('export FLEET_MODEL=trustllm-v2-8b-fleet MODEL_IDS=(a b c) '
+               'for MODEL_ID in "${MODEL_IDS[@]}"; do MODEL_DIR=$CODE_ROOT/$MODEL_ID '
+               'vllm serve "$MODEL_DIR" \\ --served-model-name "$MODEL_ID" \\ done')
+        assert extract_model("trustllm", cmd) == "trustllm-v2-8b-fleet"
+
+    def test_only_junk_gives_unknown(self):
+        assert extract_model("job", "vllm serve --served-model-name $ROOT") == "unknown-model"

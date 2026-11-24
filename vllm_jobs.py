@@ -21,9 +21,14 @@ INFERENCE_SERVER_RE = re.compile(
     r"\b(vllm|api_server|openai[._-]api|whisper_openai_api)\b",
     re.I,
 )
-MODEL_ARG_RE = re.compile(r"(?:^|\s)--model(?:\s+|=)([^\s]+)")
-MODEL_PATH_ARG_RE = re.compile(r"(?:^|\s)--model-path(?:\s+|=)([^\s]+)")
-SERVED_MODEL_ARG_RE = re.compile(r"(?:^|\s)--served-model-name(?:\s+|=)([^\s]+)")
+# Values may be quoted with spaces ("00 - Aleph Kolibri") and, because the
+# launch script is flattened to one line, may be preceded by a `\` line
+# continuation.
+_ARG_VALUE = r"""(?:\s+\\)*(?:\s+|=)("[^"]*"|'[^']*'|[^\s"']+)"""
+MODEL_ARG_RE = re.compile(r"(?:^|\s)--model" + _ARG_VALUE)
+MODEL_PATH_ARG_RE = re.compile(r"(?:^|\s)--model-path" + _ARG_VALUE)
+SERVED_MODEL_ARG_RE = re.compile(r"(?:^|\s)--served-model-name" + _ARG_VALUE)
+SHELL_VAR_RE = re.compile(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$")
 CONTAINER_MODEL_RE = re.compile(r"/(?:models|model|p/scratch|p/project)/([A-Za-z0-9_.:/@+-]+)")
 
 
@@ -104,18 +109,47 @@ def normalize_model(value: str) -> str:
     return value
 
 
+def is_valid_model_name(value: str) -> bool:
+    """Reject shell syntax that leaked out of a launch script."""
+    if not value or value in {"unknown-model", "\\"} or value.startswith("-"):
+        return False
+    return not any(ch in value for ch in "$`(){}[]|;<>\\")
+
+
+def _resolve_shell_var(value: str, command: str) -> str:
+    match = SHELL_VAR_RE.match(value.strip("'\""))
+    if not match:
+        return value
+    assign = re.search(
+        r"(?:^|[\s;])(?:export\s+)?" + re.escape(match.group(1)) + r"""=("[^"]*"|'[^']*'|[^\s;]+)""",
+        command,
+    )
+    return assign.group(1) if assign else value
+
+
 def extract_model(name: str, command: str) -> str:
     for pattern in (SERVED_MODEL_ARG_RE, MODEL_ARG_RE, MODEL_PATH_ARG_RE):
-        match = pattern.search(command)
-        if match:
-            return normalize_model(match.group(1))
-    match = CONTAINER_MODEL_RE.search(command)
-    if match:
-        return normalize_model(match.group(1))
+        for match in pattern.finditer(command):
+            value = _resolve_shell_var(match.group(1), command)
+            if value.endswith(")") and "(" not in value:
+                value = value[:-1]  # last element of a bash array: ARGS=(... name)
+            model = normalize_model(value)
+            if is_valid_model_name(model):
+                return model
+    # Fleet launchers serve several models from a loop variable; they name
+    # the fleet instead.
+    fleet = re.search(r"(?:^|[\s;])(?:export\s+)?FLEET_MODEL=([^\s;\"']+)", command)
+    if fleet and is_valid_model_name(fleet.group(1)):
+        return fleet.group(1)
+    for match in CONTAINER_MODEL_RE.finditer(command):
+        model = normalize_model(match.group(1))
+        if is_valid_model_name(model):
+            return model
     lowered_name = name.lower()
     if "vllm" in lowered_name or "model" in lowered_name:
-        cleaned = re.sub(r"^(vllm|serve|model)[-_]?", "", name, flags=re.I)
-        return normalize_model(cleaned)
+        cleaned = normalize_model(re.sub(r"^(vllm|serve|model)[-_]?", "", name, flags=re.I))
+        if is_valid_model_name(cleaned):
+            return cleaned
     return "unknown-model"
 
 
