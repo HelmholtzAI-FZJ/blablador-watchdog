@@ -242,30 +242,20 @@ serve several models from a loop report their `FLEET_MODEL`
 
 ## Gateway user monitoring (`monitor-cluster.sh`)
 
-Since 2026-11-20 `api.blablador.fz-juelich.de` is served by APISIX in
-namespace `apisix-all-test` (context `blablador-import`; source:
-gitlab.jsc.fz-juelich.de/rushchanskii2/blablador-apisix-api). The old
-OpenResty Redis in `app-ns` gets no traffic — reading it gave empty top-user,
-model, throttled and banned lists. Defaults: `KUBE_CONTEXT`,
-`REDIS_NAMESPACE=apisix-all-test`, local port **6381** so a stale forward on
-6379 to the old Redis is never reused.
+Deployment specifics (cluster context, namespaces, gateway source repo,
+operational caveats) are **not** in this public repo: they live in the
+gitignored `CLAUDE.local.md` and the script reads its connection settings from
+the gitignored `monitor-cluster.env` (`KUBE_CONTEXT`, `REDIS_NAMESPACE`). Keep
+it that way — this repository is public.
 
-- Rate limits are in the APISIX configmap (`rate_limits.default`: punished 1,
-  external 20, internal 40, elevated 140 req/60s, superuser unlimited), not in
-  `rate_limits:*` keys; `declare_default_limit` mirrors them. Update both
-  together.
-- The APISIX Redis has no persistence. `access_control:users` (bans,
-  superuser/elevated grants) is filled by hand via the APISIX repo's
-  `scripts/configure-users.sh` and vanishes on every pod restart; the summary
-  prints a WARNING when the hash is missing. Measured 2026-11-24: missing
-  after the 17h-ago restart.
+- Rate limits mirror the gateway config in `declare_default_limit`
+  (punished 1, external 20, internal 40, elevated 140 req/60s, superuser
+  unlimited). Update both together.
 - "Banned" has three sources, all shown by `banned-users` (and in `all`):
-  `blacklisted` (403) / `punished` (1 req/min) entries in
-  `access_control:users`, with request counts for those still active; the
-  `access_control:blacklisted_domains` set (403 for the domain and every
-  subdomain — `banned_domain_for` mirrors the APISIX suffix rule); and active
-  users whose e-mail falls under a banned domain. Temporary `throttle:*`
-  blocks stay in `throttled`. Seed lists live in the APISIX repo
-  (`scripts/add_user_status.sh`, `scripts/add_domain_bans.sh`).
+  `blacklisted` / `punished` entries in `access_control:users`, the
+  `access_control:blacklisted_domains` set (domain and every subdomain —
+  `banned_domain_for` mirrors the gateway's suffix rule), and active users
+  caught by a domain ban. Temporary `throttle:*` blocks stay in `throttled`.
 - Never print raw `rate:*` / `user:priority:*` key names: they contain users'
-  API tokens (`glpat-…`). Show only prefixes or resolved e-mails.
+  API tokens. Show only prefixes or resolved e-mails. Never commit e-mails,
+  banned domains, or user counts.

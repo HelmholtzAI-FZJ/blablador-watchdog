@@ -3,17 +3,19 @@
 # Cluster Usage Monitoring Script
 # Monitors active users, their rights, used models, rate limits, and throttle status
 
-# Production traffic for api.blablador.fz-juelich.de goes through APISIX in
-# `apisix-all-test` since 2026-11-20. The old OpenResty Redis in `app-ns`
-# receives no requests any more, so reading it shows empty lists.
-KUBE_CONTEXT="${KUBE_CONTEXT:-blablador-import}"
-REDIS_NAMESPACE="${REDIS_NAMESPACE:-apisix-all-test}"
+# Cluster context and namespace are private: set them in the gitignored
+# monitor-cluster.env next to this script (or in the environment).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "$SCRIPT_DIR/monitor-cluster.env" ] && . "$SCRIPT_DIR/monitor-cluster.env"
+if [ -z "${KUBE_CONTEXT:-}" ] || [ -z "${REDIS_NAMESPACE:-}" ]; then
+    echo "Set KUBE_CONTEXT and REDIS_NAMESPACE (e.g. in monitor-cluster.env)" >&2
+    exit 1
+fi
 REDIS_HOST="${REDIS_HOST:-localhost}"
 # Own local port, so a stale forward to another Redis on 6379 is never reused.
 REDIS_PORT="${REDIS_PORT:-6381}"
 
-# APISIX keeps rate limits in its config (configmap apisix-blablador,
-# rate_limits.default), not in `rate_limits:*` Redis keys. Used when Redis
+# The gateway keeps rate limits in its config (rate_limits.default), not in `rate_limits:*` Redis keys. Used when Redis
 # has no per-model override. Requests per 60s window.
 declare_default_limit() {
     case "$1" in
@@ -38,7 +40,7 @@ if ! command -v redis-cli &> /dev/null; then
     echo "  - Docker: docker run -it --rm redis redis-cli --help"
     echo ""
     echo "Or use kubectl to access Redis directly:"
-    echo "  kubectl --context blablador-import exec -n apisix-all-test -it <redis-pod-name> -- redis-cli"
+    echo "  kubectl --context $KUBE_CONTEXT exec -n $REDIS_NAMESPACE -it <redis-pod-name> -- redis-cli"
     exit 1
 fi
 
@@ -83,7 +85,7 @@ Examples:
 Kubernetes:
   # The script now auto-starts the port-forward if needed
   # Or explicitly start it:
-  kubectl --context blablador-import port-forward svc/redis-service 6381:6379 -n apisix-all-test &
+  kubectl --context $KUBE_CONTEXT port-forward svc/redis-service 6381:6379 -n $REDIS_NAMESPACE &
   export REDIS_HOST=localhost
   $0
 
@@ -329,7 +331,7 @@ cmd_summary() {
     # Bans: details in the "Banned" sections below
     if [ "$($REDIS_CLI EXISTS access_control:users 2>/dev/null)" != "1" ]; then
         echo -e "${RED}WARNING: access_control:users does not exist in $REDIS_NAMESPACE Redis —${NC}"
-        echo -e "${RED}  no bans, superuser or elevated grants are in effect (Redis has no persistence).${NC}"
+        echo -e "${RED}  no bans, superuser or elevated grants are in effect (check the gateway Redis).${NC}"
     else
         local statuses=$($REDIS_CLI HVALS "access_control:users" 2>/dev/null)
         echo -e "Blacklisted users: ${RED}$(echo "$statuses" | grep -cx blacklisted)${NC}   Punished users: ${RED}$(echo "$statuses" | grep -cx punished)${NC}"
@@ -589,7 +591,7 @@ cmd_banned_users() {
 
     print_header "Banned Users (access_control:users)"
     if [ "$($REDIS_CLI EXISTS access_control:users 2>/dev/null)" != "1" ]; then
-        echo -e "${RED}access_control:users is missing — no user bans in effect (wiped by a Redis restart?)${NC}"
+        echo -e "${RED}access_control:users is missing — no user bans in effect (check the gateway Redis)${NC}"
     else
         local rows=$($REDIS_CLI HGETALL "access_control:users" 2>/dev/null | paste - - \
             | awk '$2 == "blacklisted" || $2 == "punished"' | sort -k2,2 -k1,1)

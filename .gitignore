@@ -157,3 +157,7 @@ cython_debug/
 # Generated plots
 metrics_plots.png
 supercomputer_model_status.png
+
+# Private deployment notes and settings (public repo)
+CLAUDE.local.md
+monitor-cluster.env
