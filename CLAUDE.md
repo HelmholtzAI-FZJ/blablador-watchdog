@@ -140,7 +140,9 @@ succeed on either.
    `alias-qwen-huge`, `alias-huge`, `kimi-k3`): send
    `chat_template_kwargs: {"thinking_effort": "low"}` instead and allow a
    longer timeout. The list lives in `LOW_REASONING_ONLY` in `main.py` —
-   add new offenders there, never in a per-function copy.
+   add new offenders there, never in a per-function copy. Alias spellings
+   drop dot and space (`alias-qwen38-27b`), so they need their own marker;
+   keep it as narrow as `qwen38-27b` — `alias-qwen38-quick` takes the toggle.
 3. Do not send either toggle to non-Qwen models (e.g. `alias-fast`): they
    return `None` content.
 

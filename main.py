@@ -60,6 +60,7 @@ def model_timeout(model: str) -> float:
 LOW_REASONING_ONLY = (
     "qwen3.8",       # 2.4T + variants; enable_thinking not supported
     "qwen 3.8",      # Human-readable served names use a space
+    "qwen38-27b",    # Undotted aliases (alias-qwen38-27b) drop dot and space
     "alias-qwen-trillion",  # alias to the 2.4T
     "alias-qwen-huge",
     "alias-huge",

@@ -987,6 +987,55 @@ class TestStalledProbesDoNotHangShutdown:
         assert runtime < 5
 
 
+class TestDotlessAliasThinkingBudget:
+    """Alias spellings drop the dot and the space of the served name, so the
+    "qwen3.8" / "qwen 3.8" markers did not match alias-qwen38-27b and it kept
+    the default probe kwargs and the 70s budget. Measured cost in the
+    2026-10 full run: "alias-qwen38-27b :: Timeout after 70s" while the same
+    weights under "07 - Qwen3.8-27B-FP8" finished in 86.04s and its dotted
+    twin "alias-qwen3.8-27b" in 1.04s — a false-fail on every slow backend.
+
+    The undotted marker is deliberately "qwen38-27b", not "qwen38":
+    alias-qwen38-quick shares the prefix but accepts the enable_thinking
+    toggle and answers in 0.2s, so a broader entry would demote a healthy
+    toggle-able model onto the slow-thinking path."""
+
+    def test_qwen38_27b_spellings_share_the_thinking_budget(self):
+        for model in (
+            "alias-qwen38-27b",   # undotted alias
+            "alias-qwen3.8-27b",  # dotted alias
+            "07 - Qwen3.8-27B-FP8 - Multimodal model from Aug 2026",
+            "90 - Qwen 3.8-27B on Juwels Booster",
+            "Swift-Qwen3.8-27b",
+        ):
+            assert model_timeout(model) == SLOW_REASONING_MODEL_TIMEOUT, model
+
+    @patch("main.client", mock_client)
+    def test_dotless_alias_sends_low_thinking_effort(self):
+        with patch.object(
+            mock_client.chat.completions, "create", wraps=mock_client.chat.completions.create
+        ) as create:
+            get_llm_response("test", "alias-qwen38-27b")
+
+        assert create.call_args.kwargs["extra_body"] == {
+            "chat_template_kwargs": {"thinking_effort": "low"}
+        }
+        assert create.call_args.kwargs["timeout"] == SLOW_REASONING_MODEL_TIMEOUT
+
+    @patch("main.client", mock_client)
+    def test_qwen38_quick_keeps_the_thinking_toggle(self):
+        with patch.object(
+            mock_client.chat.completions, "create", wraps=mock_client.chat.completions.create
+        ) as create:
+            get_llm_response("test", "alias-qwen38-quick")
+
+        assert create.call_args.kwargs["extra_body"] == {
+            "top_k": 20,
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+        assert create.call_args.kwargs["timeout"] == DEFAULT_MODEL_TIMEOUT
+
+
 class TestMetadataLessSpecialModels:
     """The gateway (2026-10-21) serves alias-clef and alias-video with no
     metadata at all, so both fell through to the potato chat prompt: clef
